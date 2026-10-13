@@ -57,7 +57,7 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 # Pre-defined configs
 ##
 # Booster assets currently only provide retargeted motion data for Booster K1 robot
-from booster_train.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG
+from JY_train.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG
 from booster_assets.motions import K1_JOINT_NAMES as JOINT_NAMES
 
 

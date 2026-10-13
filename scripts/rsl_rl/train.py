@@ -97,12 +97,57 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import booster_train.tasks  # noqa: F401
+import JY_train.tasks  # noqa: F401
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def _attach_symmetry_normalizers(runner):
+    """Expose runner-owned normalizers to raw-space symmetry callbacks.
+
+    This keeps empirical normalization enabled without modifying RSL-RL.  The
+    callback module opts in by defining ``NORMALIZER_ATTR``.
+    """
+    symmetry_cfg = getattr(runner.alg, "symmetry", None)
+    if not symmetry_cfg:
+        return
+
+    callback = symmetry_cfg.get("data_augmentation_func")
+    callback_globals = getattr(callback, "__globals__", {})
+    normalizer_attr = callback_globals.get("NORMALIZER_ATTR")
+    if not normalizer_attr:
+        return
+
+    policy_normalizer = runner.obs_normalizer
+    critic_normalizer = runner.privileged_obs_normalizer
+    if not callable(getattr(policy_normalizer, "inverse", None)):
+        # empirical_normalization=False uses torch.nn.Identity; observations
+        # are already raw and the symmetry callback needs no bridge.
+        print("[INFO] Symmetry callback is using raw observations (normalization disabled).")
+        return
+    if not callable(getattr(critic_normalizer, "inverse", None)):
+        raise TypeError(
+            "Critic empirical normalizer does not provide inverse(); "
+            "raw-space symmetry cannot be constructed safely."
+        )
+
+    symmetry_env = symmetry_cfg.get("_env", runner.env)
+    target_env = symmetry_env.unwrapped
+    setattr(
+        target_env,
+        normalizer_attr,
+        {
+            "policy": policy_normalizer,
+            "critic": critic_normalizer,
+        },
+    )
+    print(
+        "[INFO] Attached policy/critic empirical normalizers to the "
+        "raw-space symmetry callback."
+    )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -179,6 +224,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    _attach_symmetry_normalizers(runner)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
