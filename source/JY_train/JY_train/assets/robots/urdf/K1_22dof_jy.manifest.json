@@ -1,0 +1,104 @@
+{
+  "source_repo": "https://github.com/BoosterRobotics/booster_assets",
+  "source_commit": "508cbee6ca9ae6fbc8c0b38dd58785a6f3fc61a2",
+  "source_path": "robots/K1/K1_22dof.urdf",
+  "note": "Pre-rename K1 model (Trunk / Left_Hip_Pitch / left_foot_link naming) that matches the walking tasks. Mesh paths are resolved against booster_assets at runtime.",
+  "meshes": {
+    "Head_1.STL": {
+      "git_blob_sha1": "9b363d0f451674f86174939f4d092b34c700bcf8",
+      "size": 509184
+    },
+    "Head_2.STL": {
+      "git_blob_sha1": "c22b6afe8821aa18e2f369ca1e21466ef780cc63",
+      "size": 1502334
+    },
+    "K1logo.STL": {
+      "git_blob_sha1": "168ef8f511862f02b18e951bb0507f454f46dd2b",
+      "size": 150584
+    },
+    "Left_Ankle_Cross.STL": {
+      "git_blob_sha1": "6807ae484099b6b55ef7db1dfb1106a7e58d02b8",
+      "size": 105984
+    },
+    "Left_Arm_1.STL": {
+      "git_blob_sha1": "5032fb2947c705b283229c11d42ded0e96ecbf77",
+      "size": 142584
+    },
+    "Left_Arm_2.STL": {
+      "git_blob_sha1": "202e54c9b135b1820c681fdd9d56ed2ac5f9d21f",
+      "size": 1258184
+    },
+    "Left_Arm_3.STL": {
+      "git_blob_sha1": "cc77fec032d21d0500352c0de11abae12a2a0341",
+      "size": 147484
+    },
+    "Left_Arm_4.STL": {
+      "git_blob_sha1": "d361bde00091acd982a0ad5b76890da84e2e0f41",
+      "size": 117584
+    },
+    "Left_Foot.STL": {
+      "git_blob_sha1": "242827b8350824b807a0c9db81eace9579ad4399",
+      "size": 2244834
+    },
+    "Left_Hip_Pitch.STL": {
+      "git_blob_sha1": "cd2827c5efb491cff5231ae4977eb6562b43d431",
+      "size": 132784
+    },
+    "Left_Hip_Roll.STL": {
+      "git_blob_sha1": "462478379cb05032086f40999467d274b28566f3",
+      "size": 37584
+    },
+    "Left_Hip_Yaw.STL": {
+      "git_blob_sha1": "9f24efb3a44c33752e29517a159971d6aa686cb2",
+      "size": 211384
+    },
+    "Left_Shank.STL": {
+      "git_blob_sha1": "da6dc7c1c72d785956e331dff1c5ea4352d6f320",
+      "size": 314184
+    },
+    "Right_Ankle_Cross.STL": {
+      "git_blob_sha1": "1d7b13baf19280275648ca59ad7b26e19294b45d",
+      "size": 105984
+    },
+    "Right_Arm_1.STL": {
+      "git_blob_sha1": "37d6af2cf8bc3f23c32bdd321453faa7e4e349ba",
+      "size": 142084
+    },
+    "Right_Arm_2.STL": {
+      "git_blob_sha1": "9675d6ecd0642b92bcd1b0be0cb11a68fd9d059b",
+      "size": 1222784
+    },
+    "Right_Arm_3.STL": {
+      "git_blob_sha1": "ab4322f7a3b8c25e3936e174c5a8eb18e067687d",
+      "size": 216234
+    },
+    "Right_Arm_4.STL": {
+      "git_blob_sha1": "b8570f179feb899201f70f63df1f4cc5f85c1771",
+      "size": 117884
+    },
+    "Right_Foot.STL": {
+      "git_blob_sha1": "df125bd4c13838b07af7b0705936037a6ca770df",
+      "size": 2245984
+    },
+    "Right_Hip_Pitch.STL": {
+      "git_blob_sha1": "d61429fa66659ae5bbac29fe10089efc5b60a65c",
+      "size": 132784
+    },
+    "Right_Hip_Roll.STL": {
+      "git_blob_sha1": "feaf0dd7eb742e4a1d127ed9d782d40faba56d85",
+      "size": 37584
+    },
+    "Right_Hip_Yaw.STL": {
+      "git_blob_sha1": "2998479507bd21de43f10618d28a6366026597ea",
+      "size": 211284
+    },
+    "Right_Shank.STL": {
+      "git_blob_sha1": "92a95a15e379676234304200fb107830387e8d58",
+      "size": 314284
+    },
+    "Trunk.STL": {
+      "git_blob_sha1": "ec286f0b92bc5de19c51af2d509d0ce25b6590c6",
+      "size": 356484
+    }
+  }
+}

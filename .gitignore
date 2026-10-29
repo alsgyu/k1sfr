@@ -69,3 +69,8 @@ tests/
 
 # Docker history
 .isaac-lab-docker-history
+
+# VIGOR: keyframe datasets travel via scripts/vigor/sync.sh (sha256 tracked in vigor/data_manifest.json)
+data/vigor/*.npz
+# results pulled back from the GPU machine
+results/
