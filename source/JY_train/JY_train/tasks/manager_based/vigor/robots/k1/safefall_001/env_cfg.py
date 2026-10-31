@@ -3,7 +3,8 @@
 No demonstrations and no stand-up (another team handles getting up).  Episodes start
 from the walking stance tipping or pushed in a random direction and last 4 s; the reward
 (``safefall_math``) lets only fists and feet touch the ground, rewards holding the body up
-on the fists with stiff arms, and penalises head, trunk, knee/thigh and forearm contact.
+on the fists with stiff arms, penalises head, trunk, knee/thigh and forearm contact, and
+keeps forward falls chest down and backward falls chest up.
 The same task runs on the laptop in MuJoCo (scripts/vigor/safefall_mujoco.py).
 """
 
@@ -100,6 +101,7 @@ class ObservationsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         heights = ObsTerm(func=mdp.body_heights)
         contact_forces = ObsTerm(func=mdp.contact_force_groups)
+        facing = ObsTerm(func=mdp.fall_facing)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -160,6 +162,7 @@ class RewardsCfg:
     fist_impact = _sf("fist_impact")
     head_descent = _sf("head_descent")
     trunk_descent = _sf("trunk_descent")
+    facing = _sf("facing")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     joint_pos_limit = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)

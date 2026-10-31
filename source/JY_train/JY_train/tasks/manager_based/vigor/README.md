@@ -23,7 +23,8 @@ clips (catch the fall on both hands, stand up from there without lying down).
 
 Stand-up is handled elsewhere; this task only asks the K1 to fall safely on flat ground: land
 on the fists, let nothing else touch, and hold a fist plank (fists + feet, stiff arms) until
-the end of the 4 s episode. Lowering down afterwards is the robot's damping mode (kp = 0),
+the end of the 4 s episode, on the side it fell to (forward falls chest down, backward falls
+chest up). Lowering down afterwards is the robot's damping mode (kp = 0),
 checked with `--release_after`. No demonstrations: v1-v3 tracked references the K1 could not
 follow inside a fall ("arms up, face first"). The reward is written on the fall itself
 (`vigor/safefall_math.py`, shared with the MuJoCo check):
@@ -37,6 +38,7 @@ follow inside a fall ("arms up, face first"). The reward is written on the fall 
 | `trunk_contact` / `leg_contact` / `arm_contact` | -5 / -15 / -2 | contact force on trunk / hips-thighs-knees / upper arms-forearms |
 | `fist_impact` | -1 | fist force above 2 body weights (let the elbows give) |
 | `head_descent` / `trunk_descent` | -1 / -0.5 | falling fast close to the ground |
+| `facing` | -5 | turned round mid-fall (forward fall chest up, backward chest down), scaled by cos of the fall direction; also voids `plank` and `fist_share` |
 | `upright` | +3 | still standing (not falling stays the best outcome) |
 
 plus action-rate / joint-limit / joint-velocity / acceleration / torque regularisation. Impacts
@@ -44,7 +46,7 @@ last a few 20 ms steps while the plank pays for seconds, hence the large contact
 hit costs more than a whole episode of plank). Contact forces are the peak over the 10 physics
 substeps of a policy step. Episodes start from the walking stance tipping 10-30 deg (0.5-2.5 rad/s) or pushed (0.8-2.0 m/s), 45 % forward, 20 %
 backward, 35 % sideways. The actor sees only IMU + joints + last action (3-step history), so it
-deploys without distillation; the critic also gets velocities, heights and contact forces.
+deploys without distillation; the critic also gets velocities, heights, contact forces and the fall direction.
 
 ```bash
 # laptop, MuJoCo (same URDF, gains, starts and reward), ~15 min for 1500 iterations
@@ -59,7 +61,8 @@ python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --
 
 Outcomes (training `Metrics/monitor/*`, eval `summary.json`): `head_hit` / `trunk_hit` /
 `knee_hit`, their peak forces (body weights), `fist_share`, `fists_first`, `plank` (fraction of
-the time after touch-down spent on the fists only), `upright_end`; with `--release_after` also
+the time after touch-down spent on the fists only), `upright_end`, `flipped` (turned round by the
+end: forward fall chest up / backward fall chest down); with `--release_after` also
 `release_*` for the lowering phase.
 
 ### v3 (2026-10-31) - K1-native get-up and brace (flat ground)

@@ -5,7 +5,8 @@ Shared by the Isaac task (``mdp/safefall.py``) and the laptop-side MuJoCo check
 was checked locally.  Impact mitigation only (another team handles getting up): land on
 the fists, nothing else -- head, trunk, knees, thighs and forearms stay off the ground --
 and keep holding the fist plank (fists + feet) with stiff arms until the end of the
-episode; lowering down afterwards is a damping release on the robot.
+episode; lowering down afterwards is a damping release on the robot.  Falls keep the side
+they started on: forward falls end chest down, backward falls chest up (no turning round).
 """
 
 from __future__ import annotations
@@ -61,6 +62,10 @@ WEIGHTS = {
     "fist_impact": -1.0,  # per body weight above 2: let the elbows give instead of landing rigid
     "head_descent": -1.0,
     "trunk_descent": -0.5,
+    # turned round mid-fall (forward fall ending chest up, backward chest down).  The plank does not
+    # care which side faces the ground and a supine fists-and-feet table is easier to hold, so turning
+    # also voids plank and fist_share and costs more than they pay
+    "facing": -5.0,
 }
 
 
@@ -73,6 +78,14 @@ class FallState:
     head_vz: torch.Tensor  # vertical velocities [m/s]
     trunk_vz: torch.Tensor
     up: torch.Tensor  # cos(trunk tilt) = -projected_gravity_z
+    chest_z: torch.Tensor  # world z of the trunk's forward axis: < 0 chest down, > 0 chest up
+    facing: torch.Tensor  # cos(fall azimuth from the heading): +1 forward fall, -1 backward, ~0 sideways
+
+
+def chest_z(quat: torch.Tensor) -> torch.Tensor:
+    """World z of the body x (forward) axis of (w, x, y, z) quaternions (= -projected_gravity_x)."""
+    w, x, y, z = quat.unbind(-1)
+    return 2.0 * (x * z - w * y)
 
 
 def _on(x: torch.Tensor) -> torch.Tensor:
@@ -100,10 +113,11 @@ def terms(s: FallState) -> dict[str, torch.Tensor]:
     falling = (s.up < FALLING_COS) & ~_on(f["head"] + f["trunk"]) & (s.trunk_h > PLANK_MIN_TRUNK)
     lead = torch.sigmoid((torch.minimum(s.head_h, s.trunk_h) - s.hand_h) / 0.05) * falling
     bw = lambda x: (x / WEIGHT).clamp(0.0, 4.0)  # noqa: E731
+    turned = (s.facing * s.chest_z).clamp(0.0, 1.0)
     return {
         "upright": upright(s).float(),
-        "plank": plank(s),
-        "fist_share": share,
+        "plank": plank(s) * (1.0 - turned),
+        "fist_share": share * (1.0 - turned),
         "hands_lead": lead,
         "head_contact": _on(f["head"]).float(),
         "head_impact": bw(f["head"]),
@@ -114,6 +128,7 @@ def terms(s: FallState) -> dict[str, torch.Tensor]:
         # descending fast close to the ground means the arms did not brake the fall
         "head_descent": (-s.head_vz).clamp_min(0.0).square() * torch.exp(-s.head_h / 0.25),
         "trunk_descent": (-s.trunk_vz).clamp_min(0.0).square() * torch.exp(-(s.trunk_h - 0.1).clamp_min(0.0) / 0.2),
+        "facing": turned,
     }
 
 
@@ -156,7 +171,7 @@ def sample_starts(n: int, device="cpu") -> dict[str, torch.Tensor]:
     ang_vel = axis * omega.unsqueeze(-1)
     lin_vel = torch.cross(ang_vel, root_rel, dim=-1) + dir_w * speed.unsqueeze(-1)
     return {"root_quat": root_quat, "root_rel": root_rel, "lin_vel": lin_vel, "ang_vel": ang_vel,
-            "direction": direction, "tilt": tilt}
+            "direction": direction, "tilt": tilt, "facing": torch.cos(azim)}
 
 
 # ------------------------------------------------------------------- outcomes
@@ -169,10 +184,11 @@ class OutcomeTracker:
     fists_first : the first touch-down (feet aside) was taken mainly by the fists
     plank       : fraction of the time after the first touch-down spent held up on the fists only
     upright_end : upright at the last step
+    flipped     : turned round by the last step (forward fall chest up / backward fall chest down)
     """
 
     KEYS = ("head_hit", "trunk_hit", "knee_hit", "head_peak", "trunk_peak", "leg_peak", "fist_share", "fists_first",
-            "plank", "upright_end")
+            "plank", "upright_end", "flipped")
 
     def __init__(self, num_envs: int, device="cpu"):
         z = lambda: torch.zeros(num_envs, device=device)  # noqa: E731
@@ -201,6 +217,7 @@ class OutcomeTracker:
             "fists_first": torch.where(first, (fists >= biggest).float(), v["fists_first"]),
             "plank": planked / after.clamp_min(1.0),
             "upright_end": upright(s).float(),
+            "flipped": (s.facing * s.chest_z > 0.25).float(),
         }
         for k, x in new.items():  # in place: SafeFallMonitor logs these very tensors
             v[k].copy_(torch.where(live, x, v[k]))

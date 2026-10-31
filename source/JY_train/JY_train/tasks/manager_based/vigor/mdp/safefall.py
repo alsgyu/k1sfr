@@ -52,6 +52,8 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
         up=-robot.data.projected_gravity_b[:, 2],
+        chest_z=sf.chest_z(robot.data.root_quat_w),
+        facing=getattr(env, "safefall_facing", torch.zeros_like(ground)),
     )
     env._safefall_cache = (step, state, sf.terms(state))
     return state
@@ -75,6 +77,11 @@ def body_heights(env: ManagerBasedEnv) -> torch.Tensor:
     """Privileged: trunk, head and lower-hand heights above the ground."""
     s = fall_state(env)
     return torch.stack((s.trunk_h, s.head_h, s.hand_h), dim=-1)
+
+
+def fall_facing(env: ManagerBasedEnv) -> torch.Tensor:
+    """Privileged: cos of the episode's fall azimuth from the heading (+1 forward, -1 backward)."""
+    return fall_state(env).facing.unsqueeze(-1)
 
 
 # ---------------------------------------------------------------------- events
@@ -108,7 +115,9 @@ def reset_to_fall_start(
     robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
     if not hasattr(env, "safefall_direction"):
         env.safefall_direction = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env.safefall_facing = torch.zeros(env.num_envs, device=env.device)
     env.safefall_direction[env_ids] = st["direction"]
+    env.safefall_facing[env_ids] = st["facing"]
 
 
 # --------------------------------------------------------------------- monitor
