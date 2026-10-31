@@ -4,6 +4,8 @@
     python scripts/vigor/eval.py --policy teacher --task Booster-K1-Vigor-Teacher-Flat-Play-v0 --run <regex> --headless
     # student (distill.py checkpoint)
     python scripts/vigor/eval.py --policy student --task Booster-K1-Vigor-Student-Flat-Play-v0 --run <regex> --headless --video
+    # watch only push starts in the GUI at real speed, camera on env 0
+    python scripts/vigor/eval.py --policy teacher --task Booster-K1-Vigor-Teacher-Flat-Play-v0 --regime push --follow --real_time
 
 Writes logs/vigor/eval/<timestamp>_<policy>/summary.json (+ videos/).
 """
@@ -24,6 +26,10 @@ parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--episodes", type=int, default=500)
 parser.add_argument("--video", action="store_true", default=False)
 parser.add_argument("--video_length", type=int, default=750)
+parser.add_argument("--regime", choices=["fall", "standup", "handover", "push"], default=None,
+                    help="start every episode in this regime (default: the training mix)")
+parser.add_argument("--follow", action="store_true", default=False, help="camera follows env 0 instead of the grid")
+parser.add_argument("--real_time", action="store_true", default=False, help="slow the GUI down to real time")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 if args_cli.video:
@@ -37,6 +43,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import json
 import os
+import time
 import torch
 from datetime import datetime
 
@@ -55,6 +62,14 @@ from common import RecoveryTracker, Teacher, resolve_checkpoint
 def main():
     device = args_cli.device or "cuda:0"
     env_cfg = parse_env_cfg(args_cli.task, device=device, num_envs=args_cli.num_envs)
+    if args_cli.regime:
+        env_cfg.commands.motion.regime_probs = tuple(float(n == args_cli.regime) for n in REGIME_NAMES)
+    if args_cli.follow:
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.env_index = 0
+        env_cfg.viewer.eye = (1.6, -2.2, 0.9)
+        env_cfg.viewer.lookat = (0.0, 0.0, -0.1)
     out_dir = os.path.abspath(os.path.join("logs", "vigor", "eval", datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{args_cli.policy}"))
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if args_cli.video:
@@ -92,6 +107,7 @@ def main():
     ep_regime = command.regime.clone()  # regime of the running episode (the command resamples on reset)
     with torch.inference_mode():
         while simulation_app.is_running() and len(tracker.episodes) < args_cli.episodes:
+            t0 = time.time()
             obs, _, term, trunc, _ = env.step(act(obs))
             forces = contact.data.net_forces_w.norm(dim=-1)
             done = term | trunc
@@ -104,6 +120,8 @@ def main():
                 regime_names=[REGIME_NAMES[r] for r in ep_regime.tolist()],
             )
             ep_regime = torch.where(done, command.regime, ep_regime)
+            if args_cli.real_time:
+                time.sleep(max(0.0, base.step_dt - (time.time() - t0)))
     summary = tracker.summary() | {"policy": args_cli.policy, "checkpoint": path, "task": args_cli.task}
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
