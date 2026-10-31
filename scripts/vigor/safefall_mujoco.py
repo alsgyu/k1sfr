@@ -38,7 +38,7 @@ import torch_math as tm  # noqa: E402
 
 URDF = REPO / "source/JY_train/JY_train/assets/robots/urdf/K1_22dof_jy.urdf"
 DT, DECIMATION = spec.SIM_DT, spec.DECIMATION
-EPISODE_S = 3.0
+EPISODE_S = sf.EPISODE_S
 HISTORY = 3
 
 # BOOSTER_K1_FULL_CFG: (kp, kd, effort limit, armature) per joint pattern
@@ -248,6 +248,7 @@ class SafeFallEnv:
         self.last_action, self.prev_qvel, self.prev_z = a, qd.copy(), np.stack([head_z, trunk_z], 1)
 
         self.tracker.update(state)
+        self.last_state = state
         for k, v in parts.items():
             self.ep_sums.setdefault(k, np.zeros(self.num_envs))
             self.ep_sums[k] += v.numpy()
@@ -332,6 +333,33 @@ def render(env: SafeFallEnv, policy, path: str, per_dir: int = 1):
     print("wrote", path)
 
 
+def release_rounds(env: SafeFallEnv, policy, episodes: int, release_after: float):
+    """All envs start together; at ``release_after`` every actuator loses its position gain (the robot's
+    damping mode, actuator damping kept). Prints outcomes before and after the release."""
+    m = env.m
+    gain, bias = m.actuator_gainprm[:, 0].copy(), m.actuator_biasprm[:, 1].copy()
+    before, after = sf.OutcomeTracker(env.num_envs), sf.OutcomeTracker(env.num_envs)
+    eps_before, eps_after = [], []
+    while len(eps_before) < episodes:
+        env.reset(np.arange(env.num_envs))
+        env.obs, env.critic = env._observe()
+        for t in range(env.max_episode_length - 1):  # stop before the env's own time-out reset
+            released = t * env.step_dt >= release_after
+            m.actuator_gainprm[:, 0], m.actuator_biasprm[:, 1] = (0.0, 0.0) if released else (gain, bias)
+            with torch.inference_mode():
+                act = policy(env.obs) if policy is not None else torch.zeros(env.num_envs, env.num_actions)
+            env.step(act)
+            st = env.last_state
+            (after if released else before).update(st)
+        ids = torch.arange(env.num_envs)
+        dirs = torch.as_tensor(env.direction)
+        eps_before += before.close(ids, dirs)
+        eps_after += after.close(ids, dirs)
+    m.actuator_gainprm[:, 0], m.actuator_biasprm[:, 1] = gain, bias
+    print(json.dumps({"before_release": sf.summarize(eps_before[:episodes]),
+                      "after_release": sf.summarize(eps_after[:episodes])}, indent=1))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["train", "eval"])
@@ -343,6 +371,8 @@ def main():
     p.add_argument("--passive", action="store_true", help="eval a policy that holds the stance")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--render", default=None, help="PNG with side-view frames per fall direction")
+    p.add_argument("--release_after", type=float, default=None,
+                   help="damping mode (position gains 0, damping kept) after this many seconds; all envs in step")
     a = p.parse_args()
 
     from rsl_rl.runners import OnPolicyRunner
@@ -357,6 +387,9 @@ def main():
         runner.load(a.ckpt, load_optimizer=False)
         policy = runner.get_inference_policy(device="cpu")
     env.passive = a.passive
+    if a.release_after is not None:
+        release_rounds(env, policy, a.episodes, a.release_after)
+        return
     eps = []
     obs, _ = env.get_observations()
     with torch.inference_mode():

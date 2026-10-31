@@ -150,13 +150,17 @@ def test_safefall_math():
     assert ((lean * st["lin_vel"][:, :2]).sum(-1)[moving] > 0).all()  # falls the way it leans
     n = 4
     z = torch.zeros(n)
-    def state(head, trunk, arms, legs=0.0, head_vz=0.0):
-        f = {"head": z + head, "trunk": z + trunk, "arms": z + arms, "legs": z + legs, "feet": z}
-        return sf.FallState(force=f, head_h=z + 0.1, trunk_h=z + 0.15, hand_h=z + 0.02, head_vz=z + head_vz,
-                            trunk_vz=z, up=z)
-    braced, _ = sf.reward(state(0.0, 0.3 * sf.WEIGHT, 1.5 * sf.WEIGHT), 0.02)
-    faceplant, _ = sf.reward(state(2.0 * sf.WEIGHT, 3.0 * sf.WEIGHT, 0.0, head_vz=-3.0), 0.02)
-    assert (braced > 0).all() and (faceplant < braced).all()
+
+    def state(trunk_h, **force):
+        f = {g: z + force.get(g, 0.0) * sf.WEIGHT for g in sf.CONTACT_GROUPS}
+        return sf.FallState(force=f, head_h=z + 0.15, trunk_h=z + trunk_h, hand_h=z + 0.02, head_vz=z, trunk_vz=z, up=z)
+
+    plank, _ = sf.reward(state(0.28, fist_l=0.3, fist_r=0.3, feet=0.4), 0.02)
+    kneeling, _ = sf.reward(state(0.3, fist_l=0.2, fist_r=0.2, legs=0.4, feet=0.2), 0.02)
+    lying, _ = sf.reward(state(0.1, fist_l=0.1, fist_r=0.1, trunk=0.5, legs=0.3), 0.02)
+    faceplant, _ = sf.reward(state(0.1, head=2.0, trunk=3.0), 0.02)
+    assert (sf.plank(state(0.28, fist_l=0.3, fist_r=0.3, feet=0.4)) == 1).all()
+    assert (plank > kneeling).all() and (kneeling > lying).all() and (lying > faceplant).all()
 
 
 def test_teacher_ppo():

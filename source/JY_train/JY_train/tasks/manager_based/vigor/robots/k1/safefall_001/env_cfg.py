@@ -1,9 +1,9 @@
-"""K1 safe fall on flat ground: catch the fall on the arms, keep the head off the ground.
+"""K1 safe fall on flat ground: land on the fists and hold a fist plank.
 
 No demonstrations and no stand-up (another team handles getting up).  Episodes start
-from the walking stance tipping or pushed in a random direction and last 3 s; the reward
-(``safefall_math``) penalises head contact and trunk/head impacts, rewards the share of the
-ground load taken by the arms and hands that reach the ground before head and trunk.
+from the walking stance tipping or pushed in a random direction and last 4 s; the reward
+(``safefall_math``) lets only fists and feet touch the ground, rewards holding the body up
+on the fists with stiff arms, and penalises head, trunk, knee/thigh and forearm contact.
 The same task runs on the laptop in MuJoCo (scripts/vigor/safefall_mujoco.py).
 """
 
@@ -29,7 +29,7 @@ from JY_train.assets.robots.booster_k1_full import BOOSTER_K1_FULL_CFG, K1_FULL_
 from JY_train.tasks.manager_based.vigor import safefall_math as sf
 from JY_train.tasks.manager_based.vigor import spec
 
-EPISODE_LENGTH_S = 3.0
+EPISODE_LENGTH_S = sf.EPISODE_S
 HISTORY = 3
 ACTION_SCALE = {k: v for k, v in K1_FULL_ACTION_SCALE.items() if k not in spec.HEAD_JOINT_NAMES}
 # the walking stance has elbow yaw 0, on the hard limit and outside the 0.9 soft range
@@ -149,11 +149,15 @@ def _sf(name: str) -> RewTerm:
 class RewardsCfg:
     # task (safefall_math.WEIGHTS)
     upright = _sf("upright")
+    plank = _sf("plank")
+    fist_share = _sf("fist_share")
+    hands_lead = _sf("hands_lead")
     head_contact = _sf("head_contact")
     head_impact = _sf("head_impact")
-    trunk_impact = _sf("trunk_impact")
-    arm_share = _sf("arm_share")
-    hands_lead = _sf("hands_lead")
+    trunk_contact = _sf("trunk_contact")
+    leg_contact = _sf("leg_contact")
+    arm_contact = _sf("arm_contact")
+    fist_impact = _sf("fist_impact")
     head_descent = _sf("head_descent")
     trunk_descent = _sf("trunk_descent")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG)
