@@ -49,7 +49,7 @@ networks = sys.modules["vigor_modules.networks"]
 
 
 def test_spec():
-    assert spec.PROPRIO_DIM == 70 and spec.GOAL_DIM == 68 and spec.TERRAIN_DIM == 226
+    assert spec.PROPRIO_DIM == 70 and spec.GOAL_DIM == 70 and spec.TERRAIN_DIM == 226
     assert spec.TEACHER_OBS_DIM == spec.PROPRIO_DIM + spec.GOAL_DIM + spec.TERRAIN_DIM
     assert len(set(spec.ALL_JOINT_NAMES)) == spec.NUM_JOINTS == 22
     assert spec.KEY_BODY_NAMES[0] == spec.ROOT_BODY_NAME
@@ -64,25 +64,31 @@ def test_quaternions():
     assert torch.allclose(tm.quat_apply_inverse(q, tm.quat_apply(q, v)), v, atol=1e-5)
     yaw = torch.rand(64) * 6 - 3
     assert torch.allclose(tm.yaw_from_quat(tm.quat_from_yaw(yaw)), yaw, atol=1e-5)
-    # heading-relative features are invariant to a global yaw rotation
-    pos = torch.randn(8, 10, 3)
-    root_q = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
-    root_p = torch.randn(8, 3)
-    rot = tm.quat_from_yaw(torch.full((8,), 0.7))
-    pos2 = tm.quat_apply(rot.unsqueeze(1).expand(-1, 10, -1), pos)
-    a = tm.heading_relative_positions(pos, root_p, root_q)
-    b = tm.heading_relative_positions(pos2, tm.quat_apply(rot, root_p), tm.quat_mul(rot, root_q))
+    # goal features live in the robot root frame: invariant to any global rotation of robot + reference
+    rel = torch.randn(8, 9, 3)
+    robot_q = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
+    ref_q = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
+    g = torch.nn.functional.normalize(torch.randn(8, 4), dim=-1)
+    feat = lambda rq, fq, r: torch.cat((tm.quat_apply_inverse(rq.unsqueeze(1).expand(-1, 9, -1), r).flatten(1),  # noqa: E731
+                                        tm.quat_to_6d(tm.quat_mul(tm.quat_conjugate(rq), fq))), -1)
+    a = feat(robot_q, ref_q, rel)
+    b = feat(tm.quat_mul(g, robot_q), tm.quat_mul(g, ref_q), tm.quat_apply(g.unsqueeze(1).expand(-1, 9, -1), rel))
     assert torch.allclose(a, b, atol=1e-5)
+    six = tm.quat_to_6d(robot_q)
+    assert torch.allclose(six[:, :3].norm(dim=-1), torch.ones(8), atol=1e-5) and (six[:, :3] * six[:, 3:]).sum(-1).abs().max() < 1e-5
+    # torch.where with python scalars is used when sampling start regimes
+    assert torch.where(torch.tensor([True, False]), 1.0, 2.0).tolist() == [1.0, 2.0]
     g = tm.projected_gravity(tm.quat_from_axis_angle(torch.tensor([[1.0, 0, 0]]), torch.tensor([math.radians(20)])))
     assert abs(math.degrees(tm.tilt_angle(g).item()) - 20) < 1e-3
 
 
 def test_dataset():
     keyframes = _load("keyframes", VIGOR / "keyframes.py")
-    d = keyframes.KeyframeDataset("k1_fall_keyframes_v1.npz", strict_hash=True)
+    d = keyframes.KeyframeDataset("k1_fall_keyframes_v2.npz", strict_hash=True)
     print("   ", d.summary())
     assert d.rel_body_pos.shape == (d.num_frames, len(spec.KEY_BODY_NAMES), 3)
     assert d.rel_body_pos[:, 0].abs().max() < 1e-5  # root at origin
+    assert len(d.brace_clips) > 0, "no arm-caught clips"
     assert (d.fall_onset < d.lowest).all() and (d.lowest < d.getup_end).all() and (d.getup_end < d.clip_length).all()
     clip = torch.arange(d.num_clips)
     local, g = d.future_keyframes(clip, torch.zeros(d.num_clips) + 3.2, spec.NUM_FUTURE_KEYFRAMES)

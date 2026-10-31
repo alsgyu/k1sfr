@@ -45,9 +45,9 @@ from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 import JY_train.tasks  # noqa: F401
 from JY_train.tasks.manager_based.vigor import spec
-from JY_train.tasks.manager_based.vigor.mdp.rewards import upright_mask
+from JY_train.tasks.manager_based.vigor.mdp.commands import REGIME_NAMES
+from JY_train.tasks.manager_based.vigor.mdp.rewards import head_height, upright_mask
 from JY_train.tasks.manager_based.vigor.modules import VigorStudent
-from JY_train.tasks.manager_based.vigor.torch_math import tilt_angle
 
 from common import RecoveryTracker, Teacher, resolve_checkpoint
 
@@ -86,19 +86,24 @@ def main():
     robot = base.scene["robot"]
     contact = base.scene.sensors["contact_forces"]
     head_ids = contact.find_bodies(spec.HEAD_BODY_NAMES)[0]
-    tracker = RecoveryTracker(base.num_envs, base.step_dt, device)
+    command = base.command_manager.get_term("motion")
+    tracker = RecoveryTracker(base.num_envs, base.step_dt, device, spec.FULL_FALL_HEAD_HEIGHT)
     obs, _ = env.reset()
+    ep_regime = command.regime.clone()  # regime of the running episode (the command resamples on reset)
     with torch.inference_mode():
         while simulation_app.is_running() and len(tracker.episodes) < args_cli.episodes:
             obs, _, term, trunc, _ = env.step(act(obs))
             forces = contact.data.net_forces_w.norm(dim=-1)
+            done = term | trunc
             tracker.step(
                 upright=upright_mask(base),
-                tilt=tilt_angle(robot.data.projected_gravity_b),
+                head_height=head_height(base, robot),
                 head_contact=(forces[:, head_ids] > 1.0).any(dim=-1),
                 max_contact_force=forces.max(dim=-1).values,
-                done=term | trunc,
+                done=done,
+                regime_names=[REGIME_NAMES[r] for r in ep_regime.tolist()],
             )
+            ep_regime = torch.where(done, command.regime, ep_regime)
     summary = tracker.summary() | {"policy": args_cli.policy, "checkpoint": path, "task": args_cli.task}
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:

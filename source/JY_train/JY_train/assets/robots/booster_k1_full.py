@@ -122,5 +122,6 @@ def _action_scale(cfg, factor: float) -> dict[str, float]:
     return scale
 
 
-# Same convention as K1_ACTION_SCALE (BeyondMimic): 0.25 * effort / stiffness.
-K1_FULL_ACTION_SCALE = _action_scale(BOOSTER_K1_FULL_CFG, 0.25)
+# BeyondMimic convention (factor * effort / stiffness) with 0.5 instead of 0.25:
+# stand-ups need ~2 rad excursions, which at 0.25 meant raw actions of 5-9.
+K1_FULL_ACTION_SCALE = _action_scale(BOOSTER_K1_FULL_CFG, 0.5)

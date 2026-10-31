@@ -225,6 +225,14 @@ def main():
     def fk_bodies(root_pos, root_quat, q):
         return model.fk(root_pos, root_quat, q, names)
 
+    def touches(fk, idx: int, links: list[str], tol: float = 0.03) -> bool:
+        for link in links:
+            if link in contact:
+                pos, rot = fk[link]
+                if ((rot[idx] @ contact[link].T)[2] + pos[idx, 2]).min() < tol:
+                    return True
+        return False
+
     def lowest_point(fk):
         zmin = None
         for link, pts in contact.items():
@@ -237,7 +245,8 @@ def main():
     stand_z = spec.TRUNK_HEIGHT_NOMINAL
 
     out = {k: [] for k in ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel")}
-    meta = {k: [] for k in ("clip_names", "clip_start", "clip_length", "fall_onset", "lowest", "getup_end", "fall_dir")}
+    meta = {k: [] for k in ("clip_names", "clip_start", "clip_length", "fall_onset", "lowest", "getup_end", "fall_dir",
+                            "clip_hand_support")}
     rejected, cursor = [], 0
     sources = sorted(glob.glob(os.path.join(os.path.expanduser(args.retarget_dir), "*.npz")))
     for path in sources:
@@ -298,6 +307,10 @@ def main():
             meta["lowest"].append(lw)
             meta["getup_end"].append(getup - start)
             meta["fall_dir"].append(float(np.arctan2(np.sin(lean), np.cos(lean))))
+            # arm-caught fall: hands on the ground at the lowest pose, head and trunk off it
+            meta["clip_hand_support"].append(
+                touches(fk, lw, ["left_hand_link", "right_hand_link"]) and not touches(fk, lw, ["Trunk", "Head_1", "Head_2"])
+            )
             cursor += n
 
     arrays = {k: np.concatenate(v).astype(np.float32) for k, v in out.items()}
@@ -317,11 +330,13 @@ def main():
         lowest=np.array(meta["lowest"], dtype=np.int64),
         getup_end=np.array(meta["getup_end"], dtype=np.int64),
         fall_dir=np.array(meta["fall_dir"], dtype=np.float32),
+        clip_hand_support=np.array(meta["clip_hand_support"], dtype=bool),
         **arrays,
     )
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
     lengths = np.array(meta["clip_length"]) / fps
-    print(f"wrote {path}: {len(lengths)} segments, {cursor} frames, {lengths.min():.1f}-{lengths.max():.1f}s, sha256 {digest[:12]}")
+    print(f"wrote {path}: {len(lengths)} segments ({sum(meta['clip_hand_support'])} arm-caught), {cursor} frames, "
+          f"{lengths.min():.1f}-{lengths.max():.1f}s, sha256 {digest[:12]}")
     for name, why in rejected:
         print(f"  rejected {name}: {why}")
 
@@ -338,6 +353,7 @@ def main():
         "size_bytes": os.path.getsize(path),
         "spec_version": spec.SPEC_VERSION,
         "segments": len(lengths),
+        "arm_caught_segments": int(sum(meta["clip_hand_support"])),
         "frames": int(cursor),
         "fps": fps,
         "keyframe_stride": stride,

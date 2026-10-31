@@ -217,7 +217,9 @@ class RewardsCfg:
     track_joint_vel = RewTerm(func=mdp.track_joint_vel_exp, weight=0.125, params={"command_name": "motion", "std": 3.0})
     # regularization & safety
     torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-6)
-    torque_limit = RewTerm(func=mdp.torque_limit_excess, weight=-0.1)
+    # paper uses -0.1; the K1 PD saturates in any forceful stand-up, so at -0.1 this term
+    # outweighed all imitation rewards and the first teacher learned to stay down
+    torque_limit = RewTerm(func=mdp.torque_limit_excess, weight=-0.005)
     joint_pos_limit = RewTerm(func=mdp.joint_pos_limits, weight=-10.0)
     joint_vel_limit = RewTerm(func=mdp.joint_vel_limits, weight=-5.0, params={"soft_ratio": 1.0})
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
@@ -230,12 +232,19 @@ class RewardsCfg:
     # the head houses the stereo camera; hands/forearms/knees may touch the ground
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-0.1,
+        weight=-1.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=spec.HEAD_BODY_NAMES), "threshold": 1.0},
     )
+    # brace on hands/knees instead of landing on the trunk
+    trunk_contact = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-0.2,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="Trunk"), "threshold": 1.0},
+    )
     # TODO(stairs): foothold edge penalty (BeamDojo) once stair terrains are used in training.
+    # keep the head up: dense here (paper: post-recovery only) so catching a fall pays off
+    head_height = RewTerm(func=mdp.head_height_exp, weight=0.5, params={"std": 0.3, "gated": False})
     # post-recovery stabilization (active once upright)
-    head_height = RewTerm(func=mdp.head_height_exp, weight=0.25, params={"std": 0.1})
     base_lin_vel = RewTerm(func=mdp.base_lin_vel_l2_upright, weight=-0.01)
     base_ang_vel = RewTerm(func=mdp.base_ang_vel_l2_upright, weight=-0.05)
 

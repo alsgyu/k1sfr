@@ -18,22 +18,10 @@ import torch
 
 try:
     from . import spec
-    from .torch_math import (
-        heading_relative_positions,
-        heading_relative_quats,
-        heading_relative_vectors,
-        projected_gravity,
-        yaw_from_quat,
-    )
+    from .torch_math import projected_gravity, yaw_from_quat
 except ImportError:  # loaded by file path in laptop-side tests
     import spec
-    from torch_math import (
-        heading_relative_positions,
-        heading_relative_quats,
-        heading_relative_vectors,
-        projected_gravity,
-        yaw_from_quat,
-    )
+    from torch_math import projected_gravity, yaw_from_quat
 
 MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_manifest.json")
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 6))
@@ -110,19 +98,27 @@ class KeyframeDataset:
         self.joint_vel = t("joint_vel")
         self.root_pos = t("root_pos")
         self.root_quat = t("root_quat")
-        body_pos, body_quat = t("body_pos"), t("body_quat")
-        body_lin_vel, body_ang_vel = t("body_lin_vel"), t("body_ang_vel")
-
-        # Heading-invariant reference quantities (paper: root-relative canonical frame).
-        self.rel_body_pos = heading_relative_positions(body_pos, self.root_pos, self.root_quat)
-        self.rel_body_quat = heading_relative_quats(body_quat, self.root_quat)
-        self.rel_body_lin_vel = heading_relative_vectors(body_lin_vel, self.root_quat)
-        self.rel_body_ang_vel = heading_relative_vectors(body_ang_vel, self.root_quat)
+        body_pos = t("body_pos")
+        # World-frame quantities; the env rotates them by a per-episode yaw offset.
+        # (Per-frame heading frames are ill-defined when the trunk lies face up/down.)
+        self.rel_body_pos = body_pos - self.root_pos.unsqueeze(1)  # paper: p_i - p_0
+        self.body_quat = t("body_quat")
+        self.body_lin_vel = t("body_lin_vel")
+        self.body_ang_vel = t("body_ang_vel")
         self.root_gravity = projected_gravity(self.root_quat)
-        self.root_yaw = yaw_from_quat(self.root_quat)
+        self.root_yaw = yaw_from_quat(self.root_quat)  # only used to pick the episode's yaw offset
         # Pose-intrinsic root height: independent of where the clip was grounded.
         self.root_height = self.root_pos[:, 2:3] - body_pos[:, :, 2].min(dim=1, keepdim=True).values
         self.body_pos = body_pos
+        # clips where the person catches the fall on their hands (preferred after pushes / at hand-off)
+        self.clip_min_height = torch.stack([
+            self.root_pos[s : s + n, 2].min() for s, n in zip(self.clip_start.tolist(), self.clip_length.tolist())
+        ])
+        if "clip_hand_support" in data:
+            brace = t("clip_hand_support", torch.bool)
+        else:
+            brace = self.clip_min_height >= spec.BRACE_MIN_TRUNK_HEIGHT
+        self.brace_clips = brace.nonzero(as_tuple=True)[0]
 
     def global_index(self, clip: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
         local = torch.minimum(local.clamp_min(0), self.clip_length[clip] - 1)
@@ -139,6 +135,7 @@ class KeyframeDataset:
     def summary(self) -> str:
         secs = self.clip_length.float() / self.fps
         return (
-            f"{os.path.basename(self.path)} [{self.sha256[:12]}]: {self.num_clips} clips, {self.num_frames} frames, "
+            f"{os.path.basename(self.path)} [{self.sha256[:12]}]: {self.num_clips} clips "
+            f"({len(self.brace_clips)} arm-caught), {self.num_frames} frames, "
             f"{secs.min():.1f}-{secs.max():.1f}s per clip, keyframes every {self.stride / self.fps:.2f}s"
         )
