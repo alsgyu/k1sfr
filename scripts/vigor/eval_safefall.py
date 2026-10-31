@@ -6,6 +6,8 @@
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16
     # passive baseline (zero actions = hold the walking stance)
     python scripts/vigor/eval_safefall.py --passive --headless
+    # after holding the plank, switch to the robot's damping mode (kp = 0) and watch it lower down
+    python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --release_after 2.5
 
 Writes logs/vigor/eval/<timestamp>_safefall/summary.json (+ videos/ with --video).
 """
@@ -29,6 +31,8 @@ parser.add_argument("--follow", action="store_true", default=False, help="camera
 parser.add_argument("--real_time", action="store_true", default=False)
 parser.add_argument("--video", action="store_true", default=False)
 parser.add_argument("--video_length", type=int, default=750)
+parser.add_argument("--release_after", type=float, default=None, help="damping mode (kp = 0) after this many seconds")
+parser.add_argument("--release_damping", type=float, default=None, help="joint damping in damping mode (default: keep)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 if args_cli.video:
@@ -54,6 +58,7 @@ from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 import JY_train.tasks  # noqa: F401
 from JY_train.tasks.manager_based.vigor import safefall_math as sf
+from JY_train.tasks.manager_based.vigor.mdp.safefall import fall_state
 
 from common import resolve_checkpoint
 
@@ -89,17 +94,37 @@ def main():
 
     monitor = base.command_manager.get_term("monitor")
     monitor.collect = True
+    robot = base.scene["robot"]
+    release = sf.OutcomeTracker(base.num_envs, base.device)  # outcomes of the lowering phase alone
+    gains = {k: (a.stiffness.clone(), a.damping.clone()) for k, a in robot.actuators.items()}
     obs, _ = env.get_observations()
     with torch.inference_mode():
         while simulation_app.is_running() and len(monitor.finished) < args_cli.episodes:
             t0 = time.time()
-            obs, _, _, _ = env.step(policy(obs))
+            released = torch.zeros(base.num_envs, dtype=torch.bool, device=base.device)
+            if args_cli.release_after is not None:
+                released = base.episode_length_buf * base.step_dt >= args_cli.release_after
+                for k, act in robot.actuators.items():
+                    kp, kd = gains[k]
+                    act.stiffness[:] = torch.where(released.unsqueeze(-1), torch.zeros_like(kp), kp)
+                    if args_cli.release_damping is not None:
+                        act.damping[:] = torch.where(released.unsqueeze(-1), torch.full_like(kd, args_cli.release_damping), kd)
+            n_before = len(monitor.finished)
+            obs, _, dones, _ = env.step(policy(obs))
+            if args_cli.release_after is not None:
+                release.update(fall_state(base), live=released & ~dones.bool())
+                done_ids = dones.nonzero(as_tuple=True)[0]
+                for e, r in zip(monitor.finished[n_before:], release.close(done_ids)):
+                    e |= {f"release_{k}": r[k] for k in ("head_hit", "trunk_peak", "head_peak", "leg_peak")}
             if args_cli.real_time:
                 time.sleep(max(0.0, base.step_dt - (time.time() - t0)))
-    summary = sf.summarize(monitor.finished[: args_cli.episodes]) | {"checkpoint": path, "task": args_cli.task}
+    eps = monitor.finished[: args_cli.episodes]
+    summary = sf.summarize(eps) | {"checkpoint": path, "task": args_cli.task}
+    if args_cli.release_after is not None:
+        summary["release"] = {k: sum(e[k] for e in eps) / len(eps) for k in eps[0] if k.startswith("release_")}
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
-        json.dump(summary | {"episodes_detail": monitor.finished[: args_cli.episodes]}, f, indent=2)
+        json.dump(summary | {"episodes_detail": eps}, f, indent=2)
     print(json.dumps(summary, indent=2))
     print(f"[SafeFall] wrote {out_dir}")
     env.close()

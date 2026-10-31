@@ -21,40 +21,46 @@ clips (catch the fall on both hands, stand up from there without lying down).
 
 ## Safe fall (`Booster-K1-SafeFall-Flat-v0`) - impact mitigation only
 
-Stand-up is handled elsewhere; this task only asks the K1 to fall safely on flat ground. No
-demonstrations: v1-v3 tracked retargeted/synthetic references the K1 could not follow inside a
-fall, so they gave no usable learning signal ("arms up, face first"). The reward is written on
-the fall itself (`vigor/safefall_math.py`, shared with the MuJoCo check):
+Stand-up is handled elsewhere; this task only asks the K1 to fall safely on flat ground: land
+on the fists, let nothing else touch, and hold a fist plank (fists + feet, stiff arms) until
+the end of the 4 s episode. Lowering down afterwards is the robot's damping mode (kp = 0),
+checked with `--release_after`. No demonstrations: v1-v3 tracked references the K1 could not
+follow inside a fall ("arms up, face first"). The reward is written on the fall itself
+(`vigor/safefall_math.py`, shared with the MuJoCo check):
 
 | term | weight /s | meaning |
 |---|---|---|
-| `head_contact` / `head_impact` | -2 / -2 | head (stereo camera) on the ground / its contact force in body weights |
-| `trunk_impact` | -1 | trunk contact force above 0.6 body weights (more than resting on it) |
-| `arm_share` | +1 | share of the non-foot ground load carried by upper arms, forearms and hands |
-| `hands_lead` | +0.5 | while falling and before head/trunk touch: hands below head and trunk |
-| `head_descent` / `trunk_descent` | -0.5 / -0.3 | falling fast close to the ground (the arms did not brake) |
-| `upright` | +1 | still standing (not falling is the safest outcome) |
+| `plank` | +1.5 | 0.5 per fist on the ground while nothing but fists and feet touches, trunk held up |
+| `fist_share` | +2 | share of the ground load (feet aside) on the fists |
+| `hands_lead` | +0.5 | while falling: fists below head and trunk before they touch |
+| `head_contact` / `head_impact` | -30 / -10 | head (stereo camera) on the ground / its force in body weights |
+| `trunk_contact` / `leg_contact` / `arm_contact` | -5 / -15 / -2 | contact force on trunk / hips-thighs-knees / upper arms-forearms |
+| `fist_impact` | -1 | fist force above 2 body weights (let the elbows give) |
+| `head_descent` / `trunk_descent` | -1 / -0.5 | falling fast close to the ground |
+| `upright` | +3 | still standing (not falling stays the best outcome) |
 
-plus action-rate / joint-limit / joint-velocity / acceleration / torque regularisation. Contact
-forces are the peak over the 10 physics substeps of a policy step. Episodes are 3 s from the
-walking stance tipping 10-30 deg (0.5-2.5 rad/s) or pushed (0.8-2.0 m/s), 45 % forward, 20 %
+plus action-rate / joint-limit / joint-velocity / acceleration / torque regularisation. Impacts
+last a few 20 ms steps while the plank pays for seconds, hence the large contact weights (one head
+hit costs more than a whole episode of plank). Contact forces are the peak over the 10 physics
+substeps of a policy step. Episodes start from the walking stance tipping 10-30 deg (0.5-2.5 rad/s) or pushed (0.8-2.0 m/s), 45 % forward, 20 %
 backward, 35 % sideways. The actor sees only IMU + joints + last action (3-step history), so it
 deploys without distillation; the critic also gets velocities, heights and contact forces.
 
 ```bash
-# laptop, MuJoCo (same URDF, gains, starts and reward), ~10 min for 1000 iterations
-python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 1000 --out ~/vigor_work/safefall_mj/run1
-python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run1/model_1000.pt --render rollouts.png
+# laptop, MuJoCo (same URDF, gains, starts and reward), ~15 min for 1500 iterations
+python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 1500 --out ~/vigor_work/safefall_mj/run2
+python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run2/model_1499.pt --render rollouts.png
 python scripts/vigor/safefall_mujoco.py eval --passive
 # GPU, Isaac
 python scripts/rsl_rl/train.py --task Booster-K1-SafeFall-Flat-v0 --headless --run_name flat --max_iterations 1500
 python scripts/vigor/eval_safefall.py --run flat --headless
-python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16
+python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16 --release_after 2.5
 ```
 
-Outcomes (training `Metrics/monitor/*`, eval `summary.json`): `head_hit`, `head_peak` /
-`trunk_peak` (body weights), `arm_share` (arms' share of the largest ground load), `arms_first`
-(first touch-down taken by the arms), `fell` (trunk below 0.25 m), `upright_end`.
+Outcomes (training `Metrics/monitor/*`, eval `summary.json`): `head_hit` / `trunk_hit` /
+`knee_hit`, their peak forces (body weights), `fist_share`, `fists_first`, `plank` (fraction of
+the time after touch-down spent on the fists only), `upright_end`; with `--release_after` also
+`release_*` for the lowering phase.
 
 ### v3 (2026-10-31) - K1-native get-up and brace (flat ground)
 
