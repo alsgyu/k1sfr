@@ -140,6 +140,10 @@ def body_yank(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tenso
 _HEAD_IDS: dict[int, int] = {}
 
 
+def trunk_height(env: ManagerBasedRLEnv, asset: Articulation, sensor_name: str = "height_scanner") -> torch.Tensor:
+    return asset.data.root_pos_w[:, 2] - terrain_center_height(env, sensor_name)
+
+
 def head_height(env: ManagerBasedRLEnv, asset: Articulation, sensor_name: str = "height_scanner") -> torch.Tensor:
     if id(asset) not in _HEAD_IDS:
         _HEAD_IDS[id(asset)] = asset.find_bodies("Head_2")[0][0]

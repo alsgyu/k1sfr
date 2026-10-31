@@ -85,7 +85,9 @@ ACTIVATION_TILT_DEG = 20.0
 # preferred when the episode starts from a push or the walking hand-off.
 BRACE_MIN_TRUNK_HEIGHT = 0.25
 # Evaluation: a head this low means the robot went all the way down.
-FULL_FALL_HEAD_HEIGHT = 0.35
+# Measured on the trunk, not the head: the K1 brace pike lowers the head to ~12 cm while the
+# trunk stays ~0.37 m up; lying or sitting puts the trunk below this.
+FULL_FALL_TRUNK_HEIGHT = 0.25
 
 # Default standing heights of the K1_22dof_jy model in the walking stance,
 # measured from the sole plane (computed with scripts/vigor/data/urdf_fk.py).

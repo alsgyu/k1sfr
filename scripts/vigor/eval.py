@@ -53,7 +53,7 @@ from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 import JY_train.tasks  # noqa: F401
 from JY_train.tasks.manager_based.vigor import spec
 from JY_train.tasks.manager_based.vigor.mdp.commands import REGIME_NAMES
-from JY_train.tasks.manager_based.vigor.mdp.rewards import head_height, upright_mask
+from JY_train.tasks.manager_based.vigor.mdp.rewards import trunk_height, upright_mask
 from JY_train.tasks.manager_based.vigor.modules import VigorStudent
 
 from common import RecoveryTracker, Teacher, resolve_checkpoint
@@ -102,7 +102,7 @@ def main():
     contact = base.scene.sensors["contact_forces"]
     head_ids = contact.find_bodies(spec.HEAD_BODY_NAMES)[0]
     command = base.command_manager.get_term("motion")
-    tracker = RecoveryTracker(base.num_envs, base.step_dt, device, spec.FULL_FALL_HEAD_HEIGHT)
+    tracker = RecoveryTracker(base.num_envs, base.step_dt, device, spec.FULL_FALL_TRUNK_HEIGHT)
     obs, _ = env.reset()
     ep_regime = command.regime.clone()  # regime of the running episode (the command resamples on reset)
     with torch.inference_mode():
@@ -113,7 +113,7 @@ def main():
             done = term | trunc
             tracker.step(
                 upright=upright_mask(base),
-                head_height=head_height(base, robot),
+                trunk_height=trunk_height(base, robot),
                 head_contact=(forces[:, head_ids] > 1.0).any(dim=-1),
                 max_contact_force=forces.max(dim=-1).values,
                 done=done,

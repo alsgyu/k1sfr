@@ -267,7 +267,7 @@ class RewardsCfg:
     )
     # TODO(stairs): foothold edge penalty (BeamDojo) once stair terrains are used in training.
     # keep the head up: dense here (paper: post-recovery only) so catching a fall pays off
-    head_height = RewTerm(func=mdp.head_height_exp, weight=0.5, params={"std": 0.3, "gated": False})
+    head_height = RewTerm(func=mdp.head_height_exp, weight=0.5, params={"std": 0.3, "gated": True})
     # post-recovery stabilization (active once upright)
     base_lin_vel = RewTerm(func=mdp.base_lin_vel_l2_upright, weight=-0.01)
     base_ang_vel = RewTerm(func=mdp.base_ang_vel_l2_upright, weight=-0.05)

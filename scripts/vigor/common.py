@@ -110,7 +110,7 @@ class RecoveryTracker:
     """Per-episode recovery metrics (paper Table II spirit), split by start regime.
 
     success  : upright (tilt < 25 deg, head above 0.75 x nominal) for the last ``stable_s`` of the episode
-    full_fall: head went below ``spec.FULL_FALL_HEAD_HEIGHT`` -- the robot did not catch itself
+    full_fall: trunk went below ``spec.FULL_FALL_TRUNK_HEIGHT`` -- the robot did not catch itself
     caught   : success without a full fall (the behaviour we want after a push / at hand-off)
     time     : start of the final upright stretch (0 when it never lost uprightness)
     head     : any contact on the camera head (paper Fig. 9 'unsafe' marker)
@@ -120,34 +120,34 @@ class RecoveryTracker:
         self.dt, self.stable_s, self.full_fall_height = dt, stable_s, full_fall_height
         z = lambda: torch.zeros(num_envs, device=device)  # noqa: E731
         self.t, self.run, self.peak_force = z(), z(), z()
-        self.min_head = torch.full((num_envs,), float("inf"), device=device)
+        self.min_trunk = torch.full((num_envs,), float("inf"), device=device)
         self.head_hit = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.episodes: list[dict] = []
 
-    def step(self, upright, head_height, head_contact, max_contact_force, done, regime_names=None):
+    def step(self, upright, trunk_height, head_contact, max_contact_force, done, regime_names=None):
         """Call right after env.step().  Envs flagged ``done`` were already reset inside that step, so
         their episode is closed from the accumulated values and the current reading starts the next one."""
         for i in done.nonzero(as_tuple=True)[0].tolist():
             ok = bool(self.run[i] >= self.stable_s)
-            fell = bool(self.min_head[i] < self.full_fall_height)
+            fell = bool(self.min_trunk[i] < self.full_fall_height)
             self.episodes.append({
                 "regime": regime_names[i] if regime_names else "all",
                 "success": ok,
                 "full_fall": fell,
                 "caught": ok and not fell,
                 "time": (self.t[i] - self.run[i]).item() if ok else None,
-                "min_head_height": self.min_head[i].item(),
+                "min_trunk_height": self.min_trunk[i].item(),
                 "head_contact": bool(self.head_hit[i]),
                 "peak_contact_force": self.peak_force[i].item(),
             })
         self.t[done] = 0.0
         self.run[done] = 0.0
         self.peak_force[done] = 0.0
-        self.min_head[done] = float("inf")
+        self.min_trunk[done] = float("inf")
         self.head_hit[done] = False
         self.t += self.dt
         self.run = torch.where(upright, self.run + self.dt, torch.zeros_like(self.run))
-        self.min_head = torch.minimum(self.min_head, head_height)
+        self.min_trunk = torch.minimum(self.min_trunk, trunk_height)
         self.head_hit |= head_contact
         self.peak_force = torch.maximum(self.peak_force, max_contact_force)
 
