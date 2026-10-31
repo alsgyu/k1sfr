@@ -138,6 +138,27 @@ def test_k1_getup_stance():
         assert abs(k1_getup.STANCE[name] - value) < 1e-9, name
 
 
+def test_safefall_math():
+    """Start states tip the stance the way they claim; the reward prefers an arm-braced landing."""
+    import safefall_math as sf
+
+    st = sf.sample_starts(4096)
+    cos_tilt = 1 - 2 * (st["root_quat"][:, 1] ** 2 + st["root_quat"][:, 2] ** 2)  # trunk z-axis vs world z
+    assert torch.allclose(cos_tilt, torch.cos(st["tilt"]), atol=1e-5) and st["tilt"].max() <= math.radians(30.0) + 1e-6
+    lean = st["root_rel"][:, :2] / st["root_rel"][:, :2].norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    moving = st["tilt"] > 0.05
+    assert ((lean * st["lin_vel"][:, :2]).sum(-1)[moving] > 0).all()  # falls the way it leans
+    n = 4
+    z = torch.zeros(n)
+    def state(head, trunk, arms, legs=0.0, head_vz=0.0):
+        f = {"head": z + head, "trunk": z + trunk, "arms": z + arms, "legs": z + legs, "feet": z}
+        return sf.FallState(force=f, head_h=z + 0.1, trunk_h=z + 0.15, hand_h=z + 0.02, head_vz=z + head_vz,
+                            trunk_vz=z, up=z)
+    braced, _ = sf.reward(state(0.0, 0.3 * sf.WEIGHT, 1.5 * sf.WEIGHT), 0.02)
+    faceplant, _ = sf.reward(state(2.0 * sf.WEIGHT, 3.0 * sf.WEIGHT, 0.0, head_vz=-3.0), 0.02)
+    assert (braced > 0).all() and (faceplant < braced).all()
+
+
 def test_teacher_ppo():
     import rsl_rl.runners.on_policy_runner as opr
     from rsl_rl.algorithms import PPO
