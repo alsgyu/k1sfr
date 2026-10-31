@@ -3,7 +3,7 @@
 Builds the K1 from the same URDF and PD gains / torque limits as the Isaac task, starts
 episodes from the same falls (``safefall_math.sample_starts``), scores them with the same
 reward (``safefall_math.reward`` + the regularisation weights of the Isaac config), trains a
-PPO policy with rsl_rl and compares it against a passive fall (holding the stance).
+PPO policy with rsl_rl and compares it against the reflex alone (zero actions: reach into the hand-off plank).
 
     python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 800 --out ~/vigor_work/safefall_mj
     python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/model_800.pt --render ~/vigor_work/safefall_mj/rollouts.png
@@ -156,6 +156,10 @@ class SafeFallEnv:
             q[self.head_ids] = self.default[self.head_ids]
             for leg, sgn in (("Left", 1), ("Right", -1)):  # mid-stride leg spread
                 q[spec.ALL_JOINT_NAMES.index(f"{leg}_Hip_Pitch")] += sgn * self.rng.uniform(-0.25, 0.25)
+            if st["plank"][k] >= 0:  # held in a hand-off plank (head stays at its default)
+                body = len(self.head_ids)
+                plank = np.array(sf.PLANK_POSES[("front", "back")[int(st["plank"][k])]])
+                q[body:] = plank[body:] + self.rng.uniform(-0.05, 0.05, len(q) - body)
             q = np.clip(q, lo, hi)
             d.qpos[self.qadr] = q
             d.qpos[3:7] = st["root_quat"][k].numpy()
@@ -219,7 +223,8 @@ class SafeFallEnv:
         if self.passive:
             a[:] = 0.0
         self.prev_targets[:] = self.targets
-        self.targets[:, self.act] = self.default[self.act] + self.scale * a
+        reflex = sf.reflex_targets(tm.projected_gravity(torch.as_tensor(np.stack([d.qpos[3:7] for d in self.datas]), dtype=torch.float32)))
+        self.targets[:, self.act] = reflex.numpy() + self.scale * a  # offsets from the hand-off plank (as Isaac)
         list(self.pool.map(self._substeps, self.chunks))
         self.episode_length_buf += 1
 
@@ -232,7 +237,7 @@ class SafeFallEnv:
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, head_h=T(head_z), trunk_h=T(trunk_z), hand_h=T(hand_z),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt), trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt),
-                             up=T(-grav[:, 2]), chest_z=T(-grav[:, 0]), facing=T(self.facing))
+                             gravity_b=T(grav), q=T(qpos[:, self.qadr]), facing=T(self.facing))
         rew, parts = sf.reward(state, dt)
         lo, hi = self._soft_limits()
         q, qd = qpos[:, self.qadr], qvel[:, self.vadr]
@@ -299,7 +304,7 @@ def render(env: SafeFallEnv, policy, path: str, per_dir: int = 1):
     cam = mujoco.MjvCamera()
     cam.distance, cam.elevation = 1.8, -10
     rows = []
-    for want in range(len(sf.DIRECTION_NAMES)):
+    for want in range(len(sf.DIRECTIONS)):  # fall directions (not the plank starts)
         while True:  # resample env 0 until it starts in the wanted direction
             env.reset(np.array([0]))
             if env.direction[0] == want:
@@ -370,7 +375,7 @@ def main():
     p.add_argument("--iters", type=int, default=800)
     p.add_argument("--out", default=os.path.expanduser("~/vigor_work/safefall_mj"))
     p.add_argument("--ckpt", default=None)
-    p.add_argument("--passive", action="store_true", help="eval a policy that holds the stance")
+    p.add_argument("--passive", action="store_true", help="eval zero actions: the reflex alone (reach into the hand-off plank)")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--render", default=None, help="PNG with side-view frames per fall direction")
@@ -380,6 +385,8 @@ def main():
 
     from rsl_rl.runners import OnPolicyRunner
 
+    if a.mode == "eval":
+        sf.PLANK_START_PROB = 0.0  # falls only
     env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed)
     runner = OnPolicyRunner(env, train_cfg(a.iters), log_dir=a.out if a.mode == "train" else None, device="cpu")
     if a.mode == "train":

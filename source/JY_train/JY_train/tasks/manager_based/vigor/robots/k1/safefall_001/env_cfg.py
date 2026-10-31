@@ -3,8 +3,9 @@
 No demonstrations and no stand-up (another team handles getting up).  Episodes start
 from the walking stance tipping or pushed in a random direction and last 4 s; the reward
 (``safefall_math``) lets only fists and feet touch the ground, rewards holding the body up
-on the fists with stiff arms, penalises head, trunk, knee/thigh and forearm contact, and
-keeps forward falls chest down and backward falls chest up.
+on the fists with stiff arms in one of two fixed hand-off planks for the get-up, penalises
+head, trunk, knee/thigh and forearm contact, and keeps forward falls chest down and backward
+falls chest up.
 The same task runs on the laptop in MuJoCo (scripts/vigor/safefall_mujoco.py).
 """
 
@@ -69,8 +70,9 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    joint_pos = mdp.JointPositionActionCfg(
-        asset_name="robot", joint_names=spec.ACTION_JOINT_NAMES, scale=ACTION_SCALE, use_default_offset=True, preserve_order=True
+    # offsets from the hand-off plank on the side the chest faces (safefall_math.reflex_targets)
+    joint_pos = mdp.ReflexJointPositionActionCfg(
+        asset_name="robot", joint_names=spec.ACTION_JOINT_NAMES, scale=ACTION_SCALE, preserve_order=True
     )
     head = mdp.HoldJointPositionActionCfg(asset_name="robot", joint_names=spec.HEAD_JOINT_NAMES)
 
@@ -154,8 +156,10 @@ class RewardsCfg:
     plank = _sf("plank")
     fist_share = _sf("fist_share")
     hands_lead = _sf("hands_lead")
+    plank_pose = _sf("plank_pose")
     head_contact = _sf("head_contact")
     head_impact = _sf("head_impact")
+    head_low = _sf("head_low")
     trunk_contact = _sf("trunk_contact")
     leg_contact = _sf("leg_contact")
     arm_contact = _sf("arm_contact")

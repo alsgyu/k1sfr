@@ -4,12 +4,13 @@
     python scripts/vigor/eval_safefall.py --run flat --headless
     # watch forward falls in the GUI at real speed, camera on env 0
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16
-    # passive baseline (zero actions = hold the walking stance)
+    # baseline: zero actions = the reflex alone (reach into the hand-off plank on the side the chest faces)
     python scripts/vigor/eval_safefall.py --passive --headless
     # after holding the plank, switch to the robot's damping mode (kp = 0) and watch it lower down
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --release_after 2.5
 
-Writes logs/vigor/eval/<timestamp>_safefall/summary.json (+ videos/ with --video).
+Writes logs/vigor/eval/<timestamp>_safefall/summary.json, end_poses.json (the planks the falls ended
+in, per side, next to the target hand-off poses: for the get-up team) and videos/ with --video.
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -23,7 +24,7 @@ parser = argparse.ArgumentParser(description="Evaluate the K1 safe-fall policy."
 parser.add_argument("--task", type=str, default="Booster-K1-SafeFall-Flat-Play-v0")
 parser.add_argument("--run", type=str, default=None, help="run folder regex (latest if omitted)")
 parser.add_argument("--checkpoint", type=str, default=None, help="file name pattern or absolute path")
-parser.add_argument("--passive", action="store_true", default=False, help="zero actions (hold the stance)")
+parser.add_argument("--passive", action="store_true", default=False, help="zero actions: the reflex alone")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--episodes", type=int, default=256)
 parser.add_argument("--direction", choices=["forward", "backward", "left", "right"], default=None)
@@ -58,6 +59,7 @@ from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 import JY_train.tasks  # noqa: F401
 from JY_train.tasks.manager_based.vigor import safefall_math as sf
+from JY_train.tasks.manager_based.vigor import spec
 from JY_train.tasks.manager_based.vigor.mdp.safefall import fall_state
 
 from common import resolve_checkpoint
@@ -65,6 +67,7 @@ from common import resolve_checkpoint
 
 def main():
     device = args_cli.device or "cuda:0"
+    sf.PLANK_START_PROB = 0.0  # falls only
     if args_cli.direction:
         sf.DIRECTIONS = tuple((a, float(name == args_cli.direction)) for (a, _), name in zip(sf.DIRECTIONS, sf.DIRECTION_NAMES))
     env_cfg = parse_env_cfg(args_cli.task, device=device, num_envs=args_cli.num_envs)
@@ -125,6 +128,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary | {"episodes_detail": eps}, f, indent=2)
+    with open(os.path.join(out_dir, "end_poses.json"), "w") as f:
+        json.dump({"joint_names": spec.ALL_JOINT_NAMES, "checkpoint": path} | sf.end_poses(eps), f, indent=1)
     print(json.dumps(summary, indent=2))
     print(f"[SafeFall] wrote {out_dir}")
     env.close()

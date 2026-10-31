@@ -16,6 +16,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.utils import configclass
 
 from .. import safefall_math as sf
+from .. import spec
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
@@ -26,6 +27,7 @@ class _Ids:
         self.groups = {g: sensor.find_bodies(names, preserve_order=True)[0] for g, names in sf.CONTACT_GROUPS.items()}
         self.head = robot.find_bodies(sf.HEAD_BODY)[0][0]
         self.hands = robot.find_bodies(sf.HAND_BODIES, preserve_order=True)[0]
+        self.joints = robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]
 
 
 def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str = "contact_forces") -> sf.FallState:
@@ -51,8 +53,8 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         hand_h=pos[:, ids.hands, 2].min(dim=-1).values - ground,
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
-        up=-robot.data.projected_gravity_b[:, 2],
-        chest_z=sf.chest_z(robot.data.root_quat_w),
+        gravity_b=robot.data.projected_gravity_b,
+        q=robot.data.joint_pos[:, ids.joints],
         facing=getattr(env, "safefall_facing", torch.zeros_like(ground)),
     )
     env._safefall_cache = (step, state, sf.terms(state))
@@ -93,7 +95,8 @@ def reset_to_fall_start(
     spawn_margin: float = 0.02,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Walking stance tipping or pushed in a random direction (``safefall_math.sample_starts``)."""
+    """Walking stance tipping or pushed in a random direction, or held in a hand-off plank
+    (``safefall_math.sample_starts``)."""
     robot: Articulation = env.scene[asset_cfg.name]
     n = len(env_ids)
     st = sf.sample_starts(n, env.device)
@@ -105,6 +108,11 @@ def reset_to_fall_start(
     spread = (2.0 * torch.rand(n, device=env.device) - 1.0) * stride_spread  # mid-stride legs
     q[:, robot.find_joints("Left_Hip_Pitch")[0][0]] += spread
     q[:, robot.find_joints("Right_Hip_Pitch")[0][0]] -= spread
+    planks = torch.tensor([sf.PLANK_POSES["front"], sf.PLANK_POSES["back"]], device=env.device)[st["plank"].clamp_min(0)]
+    on = st["plank"] >= 0
+    body = len(spec.HEAD_JOINT_NAMES)  # the head stays held at its default
+    joints = robot.find_joints(spec.ALL_JOINT_NAMES[body:], preserve_order=True)[0]
+    q[:, joints] = torch.where(on.unsqueeze(-1), planks[:, body:] + 0.5 * noise[:, joints], q[:, joints])
     limits = robot.data.soft_joint_pos_limits[env_ids]
     q = torch.clamp(q, limits[..., 0], limits[..., 1])
 
