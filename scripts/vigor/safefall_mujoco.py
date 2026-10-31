@@ -119,6 +119,7 @@ class SafeFallEnv:
         self.prev_z = np.zeros((n, 2))
         self.hist = np.zeros((n, HISTORY, 70))
         self.direction = np.zeros(n, dtype=int)
+        self.facing = np.zeros(n)
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
         self.passive = False
@@ -170,6 +171,7 @@ class SafeFallEnv:
             self.targets[i] = self.prev_targets[i] = q
             self.delay[i] = self.rng.integers(0, DECIMATION)
             self.direction[i] = int(st["direction"][k])
+            self.facing[i] = float(st["facing"][k])
             self.prev_qvel[i] = d.qvel[self.vadr]
             self.prev_z[i] = d.xpos[self.head_body, 2], d.xpos[self.trunk_body, 2]
         self.last_action[ids] = 0.0
@@ -204,7 +206,7 @@ class SafeFallEnv:
         heights = np.stack([[d.xpos[self.trunk_body, 2], d.xpos[self.head_body, 2], d.xpos[self.hand_bodies, 2].min()]
                             for d in self.datas])
         forces = np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT
-        critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3]], 1)
+        critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None]], 1)
         return (torch.as_tensor(self.hist.reshape(self.num_envs, -1), dtype=torch.float32),
                 torch.as_tensor(critic, dtype=torch.float32))
 
@@ -230,7 +232,7 @@ class SafeFallEnv:
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, head_h=T(head_z), trunk_h=T(trunk_z), hand_h=T(hand_z),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt), trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt),
-                             up=T(-grav[:, 2]))
+                             up=T(-grav[:, 2]), chest_z=T(-grav[:, 0]), facing=T(self.facing))
         rew, parts = sf.reward(state, dt)
         lo, hi = self._soft_limits()
         q, qd = qpos[:, self.qadr], qvel[:, self.vadr]
@@ -370,6 +372,7 @@ def main():
     p.add_argument("--ckpt", default=None)
     p.add_argument("--passive", action="store_true", help="eval a policy that holds the stance")
     p.add_argument("--episodes", type=int, default=256)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--render", default=None, help="PNG with side-view frames per fall direction")
     p.add_argument("--release_after", type=float, default=None,
                    help="damping mode (position gains 0, damping kept) after this many seconds; all envs in step")
@@ -377,7 +380,7 @@ def main():
 
     from rsl_rl.runners import OnPolicyRunner
 
-    env = SafeFallEnv(a.envs, a.mesh_dir)
+    env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed)
     runner = OnPolicyRunner(env, train_cfg(a.iters), log_dir=a.out if a.mode == "train" else None, device="cpu")
     if a.mode == "train":
         runner.learn(num_learning_iterations=a.iters, init_at_random_ep_len=True)

@@ -148,12 +148,16 @@ def test_safefall_math():
     lean = st["root_rel"][:, :2] / st["root_rel"][:, :2].norm(dim=-1, keepdim=True).clamp_min(1e-9)
     moving = st["tilt"] > 0.05
     assert ((lean * st["lin_vel"][:, :2]).sum(-1)[moving] > 0).all()  # falls the way it leans
+    # tipping forward puts the chest down, backward the chest up
+    assert torch.allclose(sf.chest_z(st["root_quat"]), -torch.sin(st["tilt"]) * st["facing"], atol=1e-5)
+    assert (st["facing"][st["direction"] == 0] > 0.7).all() and (st["facing"][st["direction"] == 1] < -0.7).all()
     n = 4
     z = torch.zeros(n)
 
-    def state(trunk_h, **force):
+    def state(trunk_h, chest_z=-0.9, facing=1.0, **force):
         f = {g: z + force.get(g, 0.0) * sf.WEIGHT for g in sf.CONTACT_GROUPS}
-        return sf.FallState(force=f, head_h=z + 0.15, trunk_h=z + trunk_h, hand_h=z + 0.02, head_vz=z, trunk_vz=z, up=z)
+        return sf.FallState(force=f, head_h=z + 0.15, trunk_h=z + trunk_h, hand_h=z + 0.02, head_vz=z, trunk_vz=z, up=z,
+                            chest_z=z + chest_z, facing=z + facing)
 
     plank, _ = sf.reward(state(0.28, fist_l=0.3, fist_r=0.3, feet=0.4), 0.02)
     kneeling, _ = sf.reward(state(0.3, fist_l=0.2, fist_r=0.2, legs=0.4, feet=0.2), 0.02)
@@ -161,6 +165,11 @@ def test_safefall_math():
     faceplant, _ = sf.reward(state(0.1, head=2.0, trunk=3.0), 0.02)
     assert (sf.plank(state(0.28, fist_l=0.3, fist_r=0.3, feet=0.4)) == 1).all()
     assert (plank > kneeling).all() and (kneeling > lying).all() and (lying > faceplant).all()
+    # a forward fall that turned round onto its back loses the plank's worth; a backward one does not
+    table = dict(trunk_h=0.28, fist_l=0.3, fist_r=0.3, feet=0.4, chest_z=0.9)
+    turned, _ = sf.reward(state(**table), 0.02)
+    backward, _ = sf.reward(state(**table | {"facing": -1.0}), 0.02)
+    assert (turned < 0).all() and torch.allclose(backward, plank)
 
 
 def test_teacher_ppo():
