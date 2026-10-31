@@ -94,3 +94,10 @@ def projected_gravity(q: torch.Tensor) -> torch.Tensor:
 def tilt_angle(gravity_b: torch.Tensor) -> torch.Tensor:
     """Angle (rad) between the body z-axis and world up, from projected gravity."""
     return torch.acos((-gravity_b[..., 2]).clamp(-1.0, 1.0))
+
+
+def quat_to_6d(q: torch.Tensor) -> torch.Tensor:
+    """First two columns of the rotation matrix (continuous 6D rotation representation)."""
+    x_axis = quat_apply(q, torch.tensor([1.0, 0.0, 0.0], device=q.device).expand(q.shape[:-1] + (3,)))
+    y_axis = quat_apply(q, torch.tensor([0.0, 1.0, 0.0], device=q.device).expand(q.shape[:-1] + (3,)))
+    return torch.cat((x_axis, y_axis), dim=-1)

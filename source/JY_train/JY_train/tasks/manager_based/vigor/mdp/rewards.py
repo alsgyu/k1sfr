@@ -1,8 +1,9 @@
 """Reward terms of paper Table I (motion imitation, regularization & safety, post-recovery).
 
-Imitation compares root-relative keypoints in each body's own heading frame,
-so the coarse terrain projection of flat-ground demonstrations never shows up
-as a tracking error (paper Sec. III-C, AbsTrack ablation).
+Imitation compares root-relative keypoints p_i - p_0 in the world frame against the
+reference rotated by the episode's yaw offset, so the coarse terrain projection of
+flat-ground demonstrations never shows up as a tracking error (paper Sec. III-C,
+AbsTrack ablation) and nothing depends on a per-frame heading.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
 from .. import spec
-from ..torch_math import heading_relative_quats, heading_relative_vectors, quat_error_magnitude
+from ..torch_math import quat_error_magnitude
 from .commands import VigorKeyframeCommand
 from .observations import terrain_center_height
 
@@ -31,33 +32,26 @@ def _command(env: ManagerBasedRLEnv, name: str) -> VigorKeyframeCommand:
 # ----------------------------------------------------------------- imitation
 def track_body_pos_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     c = _command(env, command_name)
-    err = (c.data.rel_body_pos[c.frame] - c.robot_rel_body_pos()).square().sum(-1).mean(-1)
+    err = (c.ref_rel_body_pos() - c.robot_rel_body_pos()).square().sum(-1).mean(-1)
     return torch.exp(-err / std**2)
 
 
 def track_body_rot_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     c = _command(env, command_name)
-    d = c.robot.data
-    robot_q = heading_relative_quats(d.body_quat_w[:, c.body_ids], d.root_quat_w)
-    err = quat_error_magnitude(c.data.rel_body_quat[c.frame], robot_q).square().mean(-1)
+    robot_q = c.robot.data.body_quat_w[:, c.body_ids]
+    err = quat_error_magnitude(c.ref_body_quat(), robot_q).square().mean(-1)
     return torch.exp(-err / std**2)
 
 
 def track_body_lin_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     c = _command(env, command_name)
-    d = c.robot.data
-    robot_v = heading_relative_vectors(d.body_lin_vel_w[:, c.body_ids], d.root_quat_w)
-    ref_v = c.data.rel_body_lin_vel[c.frame] * c.speed.view(-1, 1, 1)
-    err = (ref_v - robot_v).square().sum(-1).mean(-1)
+    err = (c.ref_body_lin_vel() - c.robot.data.body_lin_vel_w[:, c.body_ids]).square().sum(-1).mean(-1)
     return torch.exp(-err / std**2)
 
 
 def track_body_ang_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
     c = _command(env, command_name)
-    d = c.robot.data
-    robot_w = heading_relative_vectors(d.body_ang_vel_w[:, c.body_ids], d.root_quat_w)
-    ref_w = c.data.rel_body_ang_vel[c.frame] * c.speed.view(-1, 1, 1)
-    err = (ref_w - robot_w).square().sum(-1).mean(-1)
+    err = (c.ref_body_ang_vel() - c.robot.data.body_ang_vel_w[:, c.body_ids]).square().sum(-1).mean(-1)
     return torch.exp(-err / std**2)
 
 
@@ -129,11 +123,13 @@ def upright_mask(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntity
     return tilt_ok & (head_height(env, asset, sensor_name) > 0.75 * spec.HEAD_HEIGHT_NOMINAL)
 
 
-def head_height_exp(env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-                    sensor_name: str = "height_scanner") -> torch.Tensor:
+def head_height_exp(env: ManagerBasedRLEnv, std: float, gated: bool = True,
+                    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), sensor_name: str = "height_scanner") -> torch.Tensor:
+    """exp(-(h - h_nominal)^2 / std^2); ``gated=False`` turns it into a dense keep-your-head-up signal."""
     asset: Articulation = env.scene[asset_cfg.name]
     err = (head_height(env, asset, sensor_name) - spec.HEAD_HEIGHT_NOMINAL).square()
-    return torch.exp(-err / std**2) * upright_mask(env, asset_cfg, sensor_name)
+    r = torch.exp(-err / std**2)
+    return r * upright_mask(env, asset_cfg, sensor_name) if gated else r
 
 
 def base_lin_vel_l2_upright(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:

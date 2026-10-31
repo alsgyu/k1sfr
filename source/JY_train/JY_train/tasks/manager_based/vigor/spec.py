@@ -7,7 +7,7 @@ interfaces cannot silently drift between machines.  Bump ``SPEC_VERSION``
 whenever a layout below changes; datasets and exported policies record it.
 """
 
-SPEC_VERSION = "k1-vigor-v1"
+SPEC_VERSION = "k1-vigor-v2"
 
 # ---------------------------------------------------------------------------
 # Kinematic names (pre-rename booster_assets naming, same as the walking tasks)
@@ -72,6 +72,12 @@ NUM_FUTURE_KEYFRAMES = 2
 
 # Controller hand-off rule from the paper: policy engages at 20 deg tilt.
 ACTIVATION_TILT_DEG = 20.0
+# Fallback definition of a "caught" demo segment for datasets without the
+# clip_hand_support flag (trunk never drops below this).  Caught segments are
+# preferred when the episode starts from a push or the walking hand-off.
+BRACE_MIN_TRUNK_HEIGHT = 0.25
+# Evaluation: a head this low means the robot went all the way down.
+FULL_FALL_HEAD_HEIGHT = 0.35
 
 # Default standing heights of the K1_22dof_jy model in the walking stance,
 # measured from the sole plane (computed with scripts/vigor/data/urdf_fk.py).
@@ -94,11 +100,13 @@ PROPRIO_TERMS = [
 ]
 PROPRIO_DIM = sum(d for _, d in PROPRIO_TERMS)  # 70
 
-# Per future keyframe: root-relative heading-frame positions of the 9 non-root
-# keypoints (27) + reference root gravity (3) + reference root height above its
-# lowest keypoint (1) + heading offset cos/sin (2) + time to keyframe (1).
-KEYFRAME_FEATURE_DIM = (len(KEY_BODY_NAMES) - 1) * 3 + 3 + 1 + 2 + 1  # 34
-GOAL_DIM = NUM_FUTURE_KEYFRAMES * KEYFRAME_FEATURE_DIM  # 68
+# Per future keyframe, all expressed in the robot's current root frame (no yaw
+# extraction, so it stays well defined when lying face up/down): the 9 non-root
+# keypoints relative to the reference root (27) + reference root orientation as a
+# 6D rotation (6) + reference root height above its lowest keypoint (1) + time to
+# the keyframe (1).
+KEYFRAME_FEATURE_DIM = (len(KEY_BODY_NAMES) - 1) * 3 + 6 + 1 + 1  # 35
+GOAL_DIM = NUM_FUTURE_KEYFRAMES * KEYFRAME_FEATURE_DIM  # 70
 
 HEIGHT_SCAN_SIZE = (1.4, 1.4)
 HEIGHT_SCAN_RESOLUTION = 0.1
@@ -106,6 +114,6 @@ HEIGHT_SCAN_POINTS = 15 * 15
 # terrain shape relative to the terrain under the trunk + trunk height above it
 TERRAIN_DIM = HEIGHT_SCAN_POINTS + 1  # 226
 
-TEACHER_OBS_DIM = PROPRIO_DIM + GOAL_DIM + TERRAIN_DIM  # 364
+TEACHER_OBS_DIM = PROPRIO_DIM + GOAL_DIM + TERRAIN_DIM  # 366
 LATENT_DIM = 32
 STUDENT_HISTORY = 25  # 0.5 s of proprioception

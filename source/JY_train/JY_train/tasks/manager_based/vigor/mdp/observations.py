@@ -7,6 +7,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 
+from ..torch_math import quat_apply_inverse
 from .commands import VigorKeyframeCommand
 
 if TYPE_CHECKING:
@@ -40,9 +41,11 @@ def terrain_context(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg, asset_cfg:
 
 
 def robot_keypoints(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
-    """Privileged: current root-relative heading-frame keypoints (critic only)."""
+    """Privileged: current keypoints relative to the root, in the root frame (critic only)."""
     command: VigorKeyframeCommand = env.command_manager.get_term(command_name)
-    return command.robot_rel_body_pos()[:, 1:].reshape(env.num_envs, -1)
+    rel = command.robot_rel_body_pos()[:, 1:]
+    q = command.robot.data.root_quat_w.unsqueeze(1).expand(-1, rel.shape[1], -1)
+    return quat_apply_inverse(q, rel).reshape(env.num_envs, -1)
 
 
 def contact_flags(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg, threshold: float = 1.0) -> torch.Tensor:

@@ -1,22 +1,25 @@
 {
   "datasets": {
-    "k1_fall_keyframes_v1.npz": {
-      "sha256": "b0704de77722831ccbc1c02bf26a58663be4bdec845a13baf10d953397a6d88b",
-      "size_bytes": 9328593,
-      "spec_version": "k1-vigor-v1",
-      "segments": 50,
-      "frames": 16779,
+    "k1_fall_keyframes_v2.npz": {
+      "sha256": "481dc1d93ad397b050726da3ee497f548a232dcd09820caa0702a4604c3ee6dc",
+      "size_bytes": 13336363,
+      "spec_version": "k1-vigor-v2",
+      "segments": 80,
+      "arm_caught_segments": 38,
+      "frames": 23995,
       "fps": 50,
       "keyframe_stride": 10,
       "source": "Ubisoft LAFAN1 (CC BY-NC-ND 4.0) fallAndGetUp*/pushAndFall*, retargeted with GMR",
       "ik_config_sha256": "10ed55b6553c19a4394231663a1273a23c4ad0a0f93bc1c987d0eaf270713f9b",
+      "gmr_commit": "25f56db79ac411258b377b6d4ccba0c8ff3372ac",
+      "lafan1_zip_sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977",
       "urdf_sha256": "9312ecc9dbd2424247d9d74c86eeb478e738dd994c787fd42116f4a4615e0a01",
       "build_args": {
         "retarget_dir": "<local>",
         "mesh_dir": "<local>",
-        "name": "k1_fall_keyframes_v1.npz",
+        "name": "k1_fall_keyframes_v2.npz",
         "out_dir": "<repo>/data/vigor",
-        "fall_z": 0.25,
+        "fall_z": 0.4,
         "stand_ratio": 0.88,
         "pre_roll": 0.6,
         "post_roll": 1.2,
@@ -25,10 +28,8 @@
         "max_joint_vel": 25.0,
         "lafan1_zip_sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977"
       },
-      "built_at_commit": "4572a874bc7d9b0eed94163005076734c029db13",
-      "built_utc": "2026-10-29T17:16:03+00:00",
-      "gmr_commit": "25f56db79ac411258b377b6d4ccba0c8ff3372ac",
-      "lafan1_zip_sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977"
+      "built_at_commit": "dff2fb0753cceee87f3cbaa8963dcaaa01eff96f",
+      "built_utc": "2026-10-31T02:14:02+00:00"
     }
   }
 }
