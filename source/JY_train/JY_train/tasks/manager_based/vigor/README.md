@@ -19,6 +19,43 @@ pose, the walking stance tipped past 12-30 deg (hand-off from the walking policy
 walking stance hit by a 0.6-1.8 m/s push. Push and hand-off starts mostly draw brace-and-rise
 clips (catch the fall on both hands, stand up from there without lying down).
 
+## Safe fall (`Booster-K1-SafeFall-Flat-v0`) - impact mitigation only
+
+Stand-up is handled elsewhere; this task only asks the K1 to fall safely on flat ground. No
+demonstrations: v1-v3 tracked retargeted/synthetic references the K1 could not follow inside a
+fall, so they gave no usable learning signal ("arms up, face first"). The reward is written on
+the fall itself (`vigor/safefall_math.py`, shared with the MuJoCo check):
+
+| term | weight /s | meaning |
+|---|---|---|
+| `head_contact` / `head_impact` | -2 / -2 | head (stereo camera) on the ground / its contact force in body weights |
+| `trunk_impact` | -1 | trunk contact force above 0.6 body weights (more than resting on it) |
+| `arm_share` | +1 | share of the non-foot ground load carried by upper arms, forearms and hands |
+| `hands_lead` | +0.5 | while falling and before head/trunk touch: hands below head and trunk |
+| `head_descent` / `trunk_descent` | -0.5 / -0.3 | falling fast close to the ground (the arms did not brake) |
+| `upright` | +1 | still standing (not falling is the safest outcome) |
+
+plus action-rate / joint-limit / joint-velocity / acceleration / torque regularisation. Contact
+forces are the peak over the 10 physics substeps of a policy step. Episodes are 3 s from the
+walking stance tipping 10-30 deg (0.5-2.5 rad/s) or pushed (0.8-2.0 m/s), 45 % forward, 20 %
+backward, 35 % sideways. The actor sees only IMU + joints + last action (3-step history), so it
+deploys without distillation; the critic also gets velocities, heights and contact forces.
+
+```bash
+# laptop, MuJoCo (same URDF, gains, starts and reward), ~10 min for 1000 iterations
+python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 1000 --out ~/vigor_work/safefall_mj/run1
+python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run1/model_1000.pt --render rollouts.png
+python scripts/vigor/safefall_mujoco.py eval --passive
+# GPU, Isaac
+python scripts/rsl_rl/train.py --task Booster-K1-SafeFall-Flat-v0 --headless --run_name flat --max_iterations 1500
+python scripts/vigor/eval_safefall.py --run flat --headless
+python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16
+```
+
+Outcomes (training `Metrics/monitor/*`, eval `summary.json`): `head_hit`, `head_peak` /
+`trunk_peak` (body weights), `arm_share` (arms' share of the largest ground load), `arms_first`
+(first touch-down taken by the arms), `fell` (trunk below 0.25 m), `upright_end`.
+
 ### v3 (2026-10-31) - K1-native get-up and brace (flat ground)
 
 The v2 flat teacher touched down with the arms first but then lay down and never stood up.
