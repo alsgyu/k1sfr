@@ -4,10 +4,14 @@ Steps per source clip:
   1. resample 30 -> 50 fps, map joints to spec.ALL_JOINT_NAMES, zero the (held) head,
      clamp to the Isaac soft joint limits (factor 0.9 as in BOOSTER_K1_CFG);
   2. ground every frame: shift the root so the lowest collision point touches z = 0;
-  3. cut stand -> fall -> lie -> get-up -> stand segments;
-  4. keep keyframes every ``stride`` frames and rebuild a *coarse* trajectory by
+  3. cut stand -> fall -> lowest-pose segments and continue each with the K1 front or
+     back get-up (k1_getup.py; human get-ups do not fit the K1), then the walking stance;
+  4. add synthetic forward brace-and-rise clips: fold into the hands-and-feet pike of the
+     K1 front get-up and stand up from it without lying down;
+  5. keep keyframes every ``stride`` frames and rebuild a *coarse* trajectory by
      interpolating between them (paper: sparse ~5 Hz structural priors);
-  5. forward kinematics on the coarse trajectory -> keypoint poses and velocities.
+  6. forward kinematics on the coarse trajectory -> keypoint poses, velocities and the
+     reference ground contacts of hands / head / trunk.
 
 Writes ``<repo>/data/vigor/<name>.npz`` and records its sha256 in the git-tracked
 ``vigor/data_manifest.json`` so the GPU machine can verify it received the same file.
@@ -25,6 +29,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import math
 import pathlib
 import struct
 import subprocess
@@ -32,6 +37,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+import k1_getup
 from urdf_fk import URDFModel, matrix_to_quat, quat_to_matrix
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -199,15 +205,17 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--retarget_dir", required=True)
     p.add_argument("--mesh_dir", required=True, help="K1 meshes (GMR assets/booster_k1/meshes or booster_assets)")
-    p.add_argument("--name", default="k1_fall_keyframes_v1.npz")
+    p.add_argument("--name", default="k1_fall_keyframes_v3.npz")
     p.add_argument("--out_dir", default=str(REPO / "data" / "vigor"))
-    p.add_argument("--fall_z", type=float, default=0.25, help="trunk height that counts as fallen")
+    p.add_argument("--fall_z", type=float, default=0.40, help="trunk height that counts as fallen")
     p.add_argument("--stand_ratio", type=float, default=0.88)
     p.add_argument("--pre_roll", type=float, default=0.6)
     p.add_argument("--post_roll", type=float, default=1.2)
     p.add_argument("--min_duration", type=float, default=1.5)
     p.add_argument("--max_duration", type=float, default=7.0)
     p.add_argument("--max_joint_vel", type=float, default=25.0, help="reject segments with retarget glitches")
+    p.add_argument("--stand_hold", type=float, default=1.5, help="walking stance held after each get-up (s)")
+    p.add_argument("--brace_hips", default="-1.8,-2.0,-2.2,-2.4", help="hip pitch of the synthetic brace pikes")
     p.add_argument("--lafan1_zip_sha256", default=None, help="provenance only: sha256 of the LAFAN1 archive used")
     args = p.parse_args()
 
@@ -220,34 +228,135 @@ def main():
     mid, half = (lo + hi) / 2, (hi - lo) / 2 * SOFT_LIMIT_FACTOR
     soft_lo, soft_hi = mid - half, mid + half
     head_ids = [names.index(n) for n in spec.HEAD_JOINT_NAMES]
+    arm_ids = [names.index(n) for n in spec.ARM_JOINT_NAMES]
     body_names = spec.KEY_BODY_NAMES
+    feet, hands, head = ["left_foot_link", "right_foot_link"], ["left_hand_link", "right_hand_link"], spec.HEAD_BODY_NAMES
+    stance_q = np.clip(k1_getup.stance(names), soft_lo, soft_hi)  # elbow yaw 0 sits on the hard limit
+    hold = stride * round(args.stand_hold * fps / stride)
 
     def fk_bodies(root_pos, root_quat, q):
         return model.fk(root_pos, root_quat, q, names)
 
-    def touches(fk, idx: int, links: list[str], tol: float = 0.03) -> bool:
-        for link in links:
-            if link in contact:
-                pos, rot = fk[link]
-                if ((rot[idx] @ contact[link].T)[2] + pos[idx, 2]).min() < tol:
-                    return True
-        return False
-
-    def lowest_point(fk):
+    def link_low(fk, links: list[str]) -> np.ndarray:
+        """(T,) lowest collision point over ``links``."""
         zmin = None
-        for link, pts in contact.items():
+        for link in links:
             pos, rot = fk[link]
-            z = (np.einsum("tij,pj->tpi", rot, pts)[..., 2] + pos[:, None, 2]).min(axis=1)
+            z = (np.einsum("tij,pj->tpi", rot, contact[link])[..., 2] + pos[:, None, 2]).min(axis=1)
             zmin = z if zmin is None else np.minimum(zmin, z)
         return zmin
 
-    # nominal standing trunk height (walking stance) for segmentation thresholds
-    stand_z = spec.TRUNK_HEIGHT_NOMINAL
+    def lowest_point(fk):
+        return link_low(fk, list(contact))
 
-    out = {k: [] for k in ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos", "body_quat", "body_lin_vel", "body_ang_vel")}
+    def touches(fk, links: list[str], tol: float = 0.025) -> np.ndarray:
+        return link_low(fk, links) - lowest_point(fk) < tol
+
+    def clearance(q, quat) -> dict[str, float]:
+        fk = fk_bodies(np.zeros((1, 3)), quat[None], q[None])
+        g = lowest_point(fk)[0]
+        return {link: link_low(fk, [link])[0] - g for link in contact}
+
+    def solve_pitch(q_of, roll, pitch0, groups, span=0.8):
+        """Trunk pitch that puts every link group on the ground at once (min-max clearance)."""
+        best = None
+        for pitch in pitch0 + np.linspace(-span, span, 161):
+            q = q_of(pitch)
+            c = clearance(q, k1_getup.rpy_quat(roll, pitch))
+            cost = max(min(c[l] for l in g) for g in groups)
+            if best is None or cost < best[0]:
+                best = (cost, pitch, q)
+        return best
+
+    def ground(q, quat, anchor_xy):
+        """Root trajectory with the lowest point on z = 0 and the feet midpoint fixed at ``anchor_xy``."""
+        rp = np.zeros((len(q), 3))
+        fk = fk_bodies(rp, quat, q)
+        rp[:, 2] = -lowest_point(fk)
+        rp[:, :2] = anchor_xy - (fk[feet[0]][0][:, :2] + fk[feet[1]][0][:, :2]) / 2
+        return rp
+
+    def densify(keys):
+        """[(frame, q, quat), ...] -> per-frame q, quat from the first to the last key frame."""
+        f = np.array([k[0] for k in keys], dtype=np.float64)
+        q, quat = resample(f, np.arange(f[0], f[-1] + 1), pos=np.stack([k[1] for k in keys]), quat=np.stack([k[2] for k in keys]))
+        return q, quat
+
+    # --- K1 get-ups (frames after keyframe 0, q, roll, pitch); yaw is applied per clip
+    getups, getup_end = {}, {}
+    for kind, m in k1_getup.GETUPS.items():
+        poses, f = [], 0
+        for k, (q_src, (roll, pitch), dur) in enumerate(zip(m.joint_pos, m.torso_roll_pitch, m.duration)):
+            q = np.clip(k1_getup.canonical(q_src, names), soft_lo, soft_hi)
+            if k in k1_getup.HEAD_SUPPORT[kind]:
+                pitch = solve_pitch(lambda _: q, roll, pitch, [head, feet[:1], feet[1:]])[1]
+            f += k1_getup.quantize(dur, fps, stride) if k else 0
+            poses.append((f, q, roll, pitch))
+            if k == 0:  # settle before pushing up
+                f += stride
+                poses.append((f, q, roll, pitch))
+        f += 2 * stride
+        poses.append((f, stance_q, 0.0, 0.0))
+        getups[kind], getup_end[kind] = poses, poses[-2][0]  # keyframe 6: standing
+        print(f"K1 {kind} get-up: {f / fps:.1f} s to the walking stance, pitches "
+              f"{[round(float(x[3]), 2) for x in poses]}")
+
+    out = {k: [] for k in ("joint_pos", "joint_vel", "root_pos", "root_quat", "body_pos", "body_quat", "body_lin_vel",
+                           "body_ang_vel", "ref_contact")}
     meta = {k: [] for k in ("clip_names", "clip_start", "clip_length", "fall_onset", "lowest", "getup_end", "fall_dir",
                             "clip_hand_support")}
     rejected, cursor = [], 0
+
+    def emit(name, qs, rp, rq, onset, lowest, getup, hand_support) -> bool:
+        nonlocal cursor
+        dq = np.abs(finite_diff(qs, dt)).max()
+        if dq > args.max_joint_vel:
+            rejected.append((name, f"joint vel {dq:.0f} rad/s"))
+            return False
+        n = len(qs)
+        # sparse keyframes -> coarse reference (keeps the final frame as a keyframe too)
+        key_idx = np.unique(np.append(np.arange(0, n, stride), n - 1))
+        tk, tf = key_idx * dt, np.arange(n) * dt
+        cq, crp, crq = resample(tk, tf, pos=qs[key_idx], lin=rp[key_idx], quat=rq[key_idx])
+        # flat ground: every coarse pose touches z = 0 (interpolation can dip below or float above it)
+        crp[:, 2] -= lowest_point(fk_bodies(crp, crq, cq))
+        fk = fk_bodies(crp, crq, cq)
+        bpos = np.stack([fk[b][0] for b in body_names], axis=1)
+        bquat = matrix_to_quat(np.stack([fk[b][1] for b in body_names], axis=1))
+        for i in range(1, n):  # sign continuity for finite differences
+            flip = np.sum(bquat[i] * bquat[i - 1], axis=-1) < 0
+            bquat[i, flip] *= -1
+        # fall direction: horizontal trunk-axis lean when it first passes 45 deg, in the onset heading frame
+        ups = trunk_up(crq)
+        tipped = ups[onset : lowest + 1] < np.cos(np.radians(45))
+        j = onset + int(np.argmax(tipped)) if tipped.any() else lowest
+        zaxis = quat_to_matrix(crq[j])[:, 2]
+        w, x, y, z = crq[onset]
+        yaw0 = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        lean = np.arctan2(zaxis[1], zaxis[0]) - yaw0
+        out["joint_pos"].append(cq)
+        out["joint_vel"].append(finite_diff(cq, dt))
+        out["root_pos"].append(crp)
+        out["root_quat"].append(crq)
+        out["body_pos"].append(bpos)
+        out["body_quat"].append(bquat)
+        out["body_lin_vel"].append(finite_diff(bpos, dt))
+        out["body_ang_vel"].append(angular_velocity(bquat, dt))
+        out["ref_contact"].append(np.stack([touches(fk, links, tol) for links, tol in zip(spec.REF_CONTACT_BODIES, spec.REF_CONTACT_TOL)], axis=-1))
+        meta["clip_names"].append(name)
+        meta["clip_start"].append(cursor)
+        meta["clip_length"].append(n)
+        meta["fall_onset"].append(onset)
+        meta["lowest"].append(lowest)
+        meta["getup_end"].append(getup)
+        meta["fall_dir"].append(float(np.arctan2(np.sin(lean), np.cos(lean))))
+        meta["clip_hand_support"].append(hand_support)
+        cursor += n
+        return True
+
+    # --- LAFAN1 falls, cut at the lowest pose and continued with the closer K1 get-up
+    yaws = np.linspace(-np.pi, np.pi, 360, endpoint=False)
+    kinds = {}
     sources = sorted(glob.glob(os.path.join(os.path.expanduser(args.retarget_dir), "*.npz")))
     for path in sources:
         src = np.load(path)
@@ -262,58 +371,76 @@ def main():
         root_pos[:, 2] -= smooth(lowest_point(fk_bodies(root_pos, root_quat, q)), 5)
 
         clip = pathlib.Path(path).stem
-        for k, (onset, lowest, getup, end) in enumerate(segment(root_pos[:, 2], trunk_up(root_quat), fps, stand_z, args)):
+        for k, (onset, lowest, _getup, _end) in enumerate(segment(root_pos[:, 2], trunk_up(root_quat), fps, spec.TRUNK_HEIGHT_NOMINAL, args)):
             start = max(0, onset - int(args.pre_roll * fps))
-            sl = slice(start, end + 1)
-            qs, rp, rq = q[sl], root_pos[sl], root_quat[sl]
-            dq = np.abs(finite_diff(qs, dt)).max()
-            if dq > args.max_joint_vel:
-                rejected.append((f"{clip}_s{k}", f"joint vel {dq:.0f} rad/s"))
-                continue
-            n = len(qs)
-            # sparse keyframes -> coarse reference (keeps the final frame as a keyframe too)
-            key_idx = np.unique(np.append(np.arange(0, n, stride), n - 1))
-            tk, tf = key_idx * dt, np.arange(n) * dt
-            cq, crp, crq = resample(tk, tf, pos=qs[key_idx], lin=rp[key_idx], quat=rq[key_idx])
-            fk = fk_bodies(crp, crq, cq)
-            # re-ground the coarse poses (interpolation can dip below the floor)
-            crp[:, 2] -= np.minimum(lowest_point(fk), 0.0)
-            fk = fk_bodies(crp, crq, cq)
-            bpos = np.stack([fk[b][0] for b in body_names], axis=1)
-            bquat = matrix_to_quat(np.stack([fk[b][1] for b in body_names], axis=1))
-            for i in range(1, n):  # sign continuity for finite differences
-                flip = np.sum(bquat[i] * bquat[i - 1], axis=-1) < 0
-                bquat[i, flip] *= -1
-            # fall direction: horizontal trunk-axis lean when it first passes 45 deg, in the onset heading frame
-            o, lw = onset - start, lowest - start
-            ups = trunk_up(crq)
-            j = o + int(np.argmax(ups[o : lw + 1] < np.cos(np.radians(45)))) if (ups[o : lw + 1] < np.cos(np.radians(45))).any() else lw
-            zaxis = quat_to_matrix(crq[j])[:, 2]
-            w, x, y, z = crq[o]
-            yaw0 = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-            lean = np.arctan2(zaxis[1], zaxis[0]) - yaw0
-            out["joint_pos"].append(cq)
-            out["joint_vel"].append(finite_diff(cq, dt))
-            out["root_pos"].append(crp)
-            out["root_quat"].append(crq)
-            out["body_pos"].append(bpos)
-            out["body_quat"].append(bquat)
-            out["body_lin_vel"].append(finite_diff(bpos, dt))
-            out["body_ang_vel"].append(angular_velocity(bquat, dt))
-            meta["clip_names"].append(f"{clip}_s{k}")
-            meta["clip_start"].append(cursor)
-            meta["clip_length"].append(n)
-            meta["fall_onset"].append(o)
-            meta["lowest"].append(lw)
-            meta["getup_end"].append(getup - start)
-            meta["fall_dir"].append(float(np.arctan2(np.sin(lean), np.cos(lean))))
-            # arm-caught fall: hands on the ground at the lowest pose, head and trunk off it
-            meta["clip_hand_support"].append(
-                touches(fk, lw, ["left_hand_link", "right_hand_link"]) and not touches(fk, lw, ["Trunk", "Head_1", "Head_2"])
-            )
-            cursor += n
+            j = lowest - start
+            qs, rp, rq = q[start : lowest + 1], root_pos[start : lowest + 1], root_quat[start : lowest + 1]
+            # closest keyframe-0 orientation (prone or supine) over all headings
+            best = None
+            for kind, poses in getups.items():
+                cand = np.stack([k1_getup.rpy_quat(poses[0][2], poses[0][3], yw) for yw in yaws])
+                ang = 2 * np.arccos(np.abs(cand @ rq[-1]).clip(max=1.0))
+                i = int(np.argmin(ang))
+                if best is None or ang[i] < best[2]:
+                    best = (kind, yaws[i], ang[i])
+            kind, yaw, ang = best
+            e = stride * int(np.ceil((j + fps * (0.3 + 0.5 * ang / np.pi)) / stride))
+            keys = [(j, qs[-1], rq[-1])] + [(e + f, qk, k1_getup.rpy_quat(r, pt, yaw)) for f, qk, r, pt in getups[kind]]
+            keys.append((keys[-1][0] + hold, stance_q, keys[-1][2]))
+            tq, tquat = densify(keys)
+            fk_j = fk_bodies(rp[-1:], rq[-1:], qs[-1:])
+            anchor = (fk_j[feet[0]][0][0, :2] + fk_j[feet[1]][0][0, :2]) / 2
+            trp = ground(tq, tquat, anchor)
+            if emit(f"{clip}_s{k}_{kind}", np.concatenate([qs[:-1], tq]), np.concatenate([rp[:-1], trp]),
+                    np.concatenate([rq[:-1], tquat]), onset - start, e, e + getup_end[kind], hand_support=False):
+                kinds[kind] = kinds.get(kind, 0) + 1
 
-    arrays = {k: np.concatenate(v).astype(np.float32) for k, v in out.items()}
+    # --- forward push: fold into the hands-and-feet pike (front keyframe 3) and rise without lying down
+    q3 = np.clip(k1_getup.canonical(k1_getup.GETUPS["front"].joint_pos[k1_getup.BRACE_KEYFRAME], names), soft_lo, soft_hi)
+    sym = k1_getup.mirrored(0.5 * (q3 + k1_getup.mirrored(q3, names, "Right")), names, "Left")  # averaged legs
+    sym[arm_ids] = k1_getup.mirrored(q3, names, "Right")[arm_ids]  # the source's right hand is the one on the ground
+    knee = [names.index(f"{s}_Knee_Pitch") for s in ("Left", "Right")]
+    hip = [names.index(f"{s}_Hip_Pitch") for s in ("Left", "Right")]
+    ankle = [names.index(f"{s}_Ankle_Pitch") for s in ("Left", "Right")]
+    rise = getups["front"][k1_getup.BRACE_KEYFRAME + 2 :]  # front keyframes 4..6 and the stance (+1: settle key)
+    onset_pitch = math.radians(spec.ACTIVATION_TILT_DEG) * 0.6
+    n_brace = 0
+    for hip_pitch in [float(v) for v in args.brace_hips.split(",")]:
+        def brace_q(pitch, hp=hip_pitch):
+            qb = sym.copy()
+            qb[hip] = hp
+            qb[ankle] = -(pitch + hp + qb[knee])  # soles flat on the ground
+            return np.clip(qb, soft_lo, soft_hi)
+
+        cost, pitch_b, qb = solve_pitch(brace_q, 0.0, 2.0, [[h] for h in hands] + [[f] for f in feet])
+        c = clearance(qb, k1_getup.rpy_quat(0.0, pitch_b))
+        print(f"brace hip {hip_pitch:+.1f}: trunk pitch {pitch_b:.2f}, hands/feet off the ground by <= {cost * 100:.1f} cm, "
+              f"head {min(c[h] for h in head) * 100:.0f} cm, trunk {c['Trunk'] * 100:.0f} cm")
+        for reach in (2, 3):  # strides from the onset to the brace: 0.4 s / 0.6 s
+            for brace_hold in (stride, 2 * stride):  # hands planted for 0.2 / 0.4 s
+                keys = [(0, stance_q, k1_getup.rpy_quat(0.0, 0.0)), (stride, stance_q, k1_getup.rpy_quat(0.0, onset_pitch))]
+                for i in range(1, reach):
+                    a = i / reach
+                    qr = stance_q + a * (qb - stance_q)
+                    qr[arm_ids] = stance_q[arm_ids] + min(1.0, 1.6 * a) * (qb - stance_q)[arm_ids]  # the arms lead
+                    keys.append((stride * (1 + i), qr, k1_getup.rpy_quat(0.0, onset_pitch + a * (pitch_b - onset_pitch))))
+                fb = stride * (1 + reach)
+                keys.append((fb, qb, k1_getup.rpy_quat(0.0, pitch_b)))
+                keys.append((fb + brace_hold, qb, k1_getup.rpy_quat(0.0, pitch_b)))
+                f0 = keys[-1][0] - getups["front"][k1_getup.BRACE_KEYFRAME + 1][0]  # brace pose takes keyframe 3's slot
+                keys += [(f0 + f, qk, k1_getup.rpy_quat(r, pt)) for f, qk, r, pt in rise]
+                keys.append((keys[-1][0] + hold, stance_q, keys[-1][2]))
+                tq, tquat = densify(keys)
+                trp = ground(tq, tquat, np.zeros(2))
+                fk = fk_bodies(trp, tquat, tq)
+                pre = slice(0, fb - stride // 2)
+                if touches(fk, hands)[pre].any() or not touches(fk, feet)[pre].all():
+                    rejected.append((f"brace hip {hip_pitch} reach {reach}", "hands touch before the brace"))
+                    continue
+                n_brace += emit(f"k1_brace_hip{-hip_pitch * 10:.0f}_r{reach}_h{brace_hold}", tq, trp, tquat, stride, fb,
+                                f0 + rise[-2][0], hand_support=True)
+
+    arrays = {k: np.concatenate(v).astype(np.float32) for k, v in out.items() if k != "ref_contact"}
     os.makedirs(args.out_dir, exist_ok=True)
     path = os.path.join(args.out_dir, args.name)
     np.savez_compressed(
@@ -323,6 +450,8 @@ def main():
         stride=np.array(stride),
         joint_names=np.array(names),
         body_names=np.array(body_names),
+        contact_names=np.array(spec.REF_CONTACT_NAMES),
+        ref_contact=np.concatenate(out["ref_contact"]),
         clip_names=np.array(meta["clip_names"]),
         clip_start=np.array(meta["clip_start"], dtype=np.int64),
         clip_length=np.array(meta["clip_length"], dtype=np.int64),
@@ -335,8 +464,8 @@ def main():
     )
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
     lengths = np.array(meta["clip_length"]) / fps
-    print(f"wrote {path}: {len(lengths)} segments ({sum(meta['clip_hand_support'])} arm-caught), {cursor} frames, "
-          f"{lengths.min():.1f}-{lengths.max():.1f}s, sha256 {digest[:12]}")
+    print(f"wrote {path}: {len(lengths)} clips (LAFAN1 falls + K1 get-up {kinds}, {n_brace} brace-and-rise), "
+          f"{cursor} frames, {lengths.min():.1f}-{lengths.max():.1f}s, sha256 {digest[:12]}")
     for name, why in rejected:
         print(f"  rejected {name}: {why}")
 
@@ -357,7 +486,9 @@ def main():
         "frames": int(cursor),
         "fps": fps,
         "keyframe_stride": stride,
-        "source": "Ubisoft LAFAN1 (CC BY-NC-ND 4.0) fallAndGetUp*/pushAndFall*, retargeted with GMR",
+        "source": "Ubisoft LAFAN1 (CC BY-NC-ND 4.0) fallAndGetUp*/pushAndFall* falls retargeted with GMR, each continued with the K1 front/back get-up; plus synthetic forward brace-and-rise clips",
+        "k1_getup_source": k1_getup.SOURCE,
+        "getup_clips": kinds,
         "ik_config_sha256": info.get("ik_config_sha256"),
         "gmr_commit": info.get("gmr_commit"),
         "lafan1_zip_sha256": args.lafan1_zip_sha256,

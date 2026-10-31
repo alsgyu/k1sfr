@@ -6,7 +6,7 @@ arXiv:2602.16511) for the 22-DoF Booster K1, wired to take over from the walking
 
 | Paper component | Here |
 |---|---|
-| Human fall/recovery demos, retargeted, 5 Hz sparse keyframes | LAFAN1 `fallAndGetUp*` / `pushAndFall*` -> GMR -> `data/vigor/k1_fall_keyframes_v2.npz` (80 segments, 38 caught on the hands) |
+| Human fall/recovery demos, retargeted, 5 Hz sparse keyframes | LAFAN1 `fallAndGetUp*` / `pushAndFall*` falls -> GMR, continued with the K1-native front/back get-up, plus synthetic brace-and-rise clips -> `data/vigor/k1_fall_keyframes_v3.npz` (`scripts/vigor/data/k1_getup.py`) |
 | Motion-terrain factorisation (vertical terrain projection) | `mdp/commands.py` (spawn clearance), rewards are root-relative so projection never costs reward |
 | Privileged teacher: goal-in-context latent `z_g = F(k_t, h_t)`, PPO, flat -> rough | `modules/networks.py:GoalInContextActor`, `modules/teacher.py`, tasks `...Teacher-Flat/Rough-v0` |
 | Reward table (imitation / regularisation / post-recovery) | `mdp/rewards.py`, weights in `vigor_env_cfg.py:RewardsCfg` |
@@ -16,8 +16,29 @@ arXiv:2602.16511) for the 22-DoF Booster K1, wired to take over from the walking
 
 Episodes start in four regimes (`mdp/commands.py`): near a demo's fall onset, around its lowest
 pose, the walking stance tipped past 12-30 deg (hand-off from the walking policy) and the upright
-walking stance hit by a 0.6-1.8 m/s push. Push and hand-off starts prefer arm-caught demos, and a
-dense head-height reward plus trunk/head contact penalties favour catching the fall on the hands.
+walking stance hit by a 0.6-1.8 m/s push. Push and hand-off starts mostly draw brace-and-rise
+clips (catch the fall on both hands, stand up from there without lying down).
+
+### v3 (2026-10-31) - K1-native get-up and brace (flat ground)
+
+The v2 flat teacher touched down with the arms first but then lay down and never stood up.
+In the LAFAN1 get-up frames 75 % pin some K1 joint at its soft limit (deep knee bends, arms
+overhead): human get-ups do not fit the K1, so the stand-up part could not be tracked.
+
+- every LAFAN1 fall is cut at its lowest pose and continued with the B-Human fast front or back
+  get-up (K1-native: straight legs, hips folded, hands-and-feet pike, ~2 s), taken from the team
+  repo INHA-Recovery-Motion; source keyframes are quantised to the 0.2 s keyframe grid, the head is
+  held at 0, and the keyframes that lean on the pitched head get their trunk pitch re-solved
+- 16 synthetic forward brace-and-rise clips: from the walking stance fold into that get-up's
+  hands-and-feet pike (both hands and feet on the ground, head 12 cm and trunk 22 cm up, held
+  0.2/0.4 s) and stand up from it; push and hand-off starts draw them with p = 0.75 and push in
+  their direction
+- the dataset records per-frame reference contacts of hands / head / trunk: `hand_contact`
+  rewards planting the hands when the reference does; head and trunk are penalised only where
+  the reference keeps them off the ground (the K1 get-ups lean on the head)
+- the pose-imitation terms are multiplied by a height gate (B-Human): no reward while the root is
+  more than 5 cm below the reference's, so lying down with matching limbs no longer pays
+- experiments are `k1_vigor_teacher_v3` / `k1_vigor_student_v3`
 
 ### v2 (2026-10-31) - what changed after the first flat teacher failed (0 % recoveries)
 

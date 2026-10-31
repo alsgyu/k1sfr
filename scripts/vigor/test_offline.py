@@ -84,11 +84,23 @@ def test_quaternions():
 
 def test_dataset():
     keyframes = _load("keyframes", VIGOR / "keyframes.py")
-    d = keyframes.KeyframeDataset("k1_fall_keyframes_v2.npz", strict_hash=True)
+    d = keyframes.KeyframeDataset("k1_fall_keyframes_v3.npz", strict_hash=True)
     print("   ", d.summary())
     assert d.rel_body_pos.shape == (d.num_frames, len(spec.KEY_BODY_NAMES), 3)
     assert d.rel_body_pos[:, 0].abs().max() < 1e-5  # root at origin
-    assert len(d.brace_clips) > 0, "no arm-caught clips"
+    assert len(d.brace_clips) > 0, "no brace-and-rise clips"
+    # brace-and-rise clips: both hands planted at the brace, head and trunk never on the ground,
+    # and the clip ends standing in the walking stance
+    c = spec.REF_CONTACT_NAMES
+    for i in d.brace_clips.tolist():
+        s, n = int(d.clip_start[i]), int(d.clip_length[i])
+        ref = d.ref_contact[s : s + n]
+        assert ref[int(d.lowest[i]), c.index("left_hand")] and ref[int(d.lowest[i]), c.index("right_hand")], d.clip_names[i]
+        assert not ref[:, [c.index("head"), c.index("trunk")]].any(), d.clip_names[i]
+        assert abs(float(d.root_height[s + n - 1]) - (spec.TRUNK_HEIGHT_NOMINAL - spec.SOLE_OFFSET)) < 0.01
+    # every other clip ends standing too (K1 get-up spliced after the human fall)
+    ends = d.clip_start + d.clip_length - 1
+    assert (d.root_height[ends, 0] > 0.45).all()
     assert (d.fall_onset < d.lowest).all() and (d.lowest < d.getup_end).all() and (d.getup_end < d.clip_length).all()
     clip = torch.arange(d.num_clips)
     local, g = d.future_keyframes(clip, torch.zeros(d.num_clips) + 3.2, spec.NUM_FUTURE_KEYFRAMES)
@@ -108,6 +120,22 @@ def test_dataset():
     lo, hi = m.limits(spec.ALL_JOINT_NAMES)
     mid, half = (lo + hi) / 2, (hi - lo) / 2 * 0.9
     assert (d.joint_pos.numpy() >= mid - half - 1e-4).all() and (d.joint_pos.numpy() <= mid + half + 1e-4).all()
+
+
+def test_k1_getup_stance():
+    """k1_getup.STANCE (Isaac-free copy) must equal the robot's K1_FULL_DEFAULT_JOINT_POS."""
+    import ast
+    import re
+
+    import k1_getup
+
+    tree = ast.parse((REPO / "source/JY_train/JY_train/assets/robots/booster_k1_full.py").read_text())
+    node = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "K1_FULL_DEFAULT_JOINT_POS" for t in n.targets))
+    patterns = ast.literal_eval(node)
+    for name in spec.ALL_JOINT_NAMES:
+        value = next(v for k, v in patterns.items() if re.fullmatch(k, name))
+        assert abs(k1_getup.STANCE[name] - value) < 1e-9, name
 
 
 def test_teacher_ppo():

@@ -122,6 +122,18 @@ class VigorKeyframeCommand(CommandTerm):
     def ref_body_ang_vel(self) -> torch.Tensor:
         return self._align(self.data.body_ang_vel[self.frame]) * self.speed.view(-1, 1, 1)
 
+    def ref_contact(self) -> torch.Tensor:
+        """(N, len(spec.REF_CONTACT_NAMES)) bool: which of hands / head / trunk touch the ground in the reference."""
+        return self.data.ref_contact[self.frame]
+
+    def ref_root_height(self) -> torch.Tensor:
+        """Reference root height above its lowest keypoint."""
+        return self.data.root_height[self.frame, 0]
+
+    def robot_root_height(self) -> torch.Tensor:
+        """Same quantity for the robot (terrain independent)."""
+        return self.robot.data.root_pos_w[:, 2] - self.robot.data.body_pos_w[:, self.body_ids, 2].min(dim=-1).values
+
     def robot_rel_body_pos(self) -> torch.Tensor:
         d = self.robot.data
         return d.body_pos_w[:, self.body_ids] - d.root_pos_w.unsqueeze(1)
@@ -327,14 +339,14 @@ class VigorKeyframeCommandCfg(CommandTermCfg):
     class_type: type = VigorKeyframeCommand
 
     asset_name: str = MISSING
-    dataset: str = "k1_fall_keyframes_v2.npz"
+    dataset: str = "k1_fall_keyframes_v3.npz"
     strict_dataset_hash: bool = True
     height_sensor_name: str = "height_scanner"
 
     # fall / stand-up / hand-off from walking / push while standing
-    regime_probs: tuple[float, float, float, float] = (0.2, 0.25, 0.35, 0.2)
-    # hand-off and push starts draw a "caught" (brace) demo with this probability
-    brace_clip_prob: float = 0.6
+    regime_probs: tuple[float, float, float, float] = (0.15, 0.25, 0.3, 0.3)
+    # hand-off and push starts draw a brace-and-rise clip with this probability
+    brace_clip_prob: float = 0.75
     fall_onset_window_s: tuple[float, float] = (-0.3, 0.6)
     lowest_window_s: tuple[float, float] = (-0.6, 0.4)
     handover_tilt_deg: tuple[float, float] = (12.0, 30.0)

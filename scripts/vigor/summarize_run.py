@@ -1,8 +1,8 @@
 """Print a training run's TensorBoard scalars as a compact text table (to paste from the GPU box).
 
-    python scripts/vigor/summarize_run.py                       # latest k1_vigor_teacher_v2 run
+    python scripts/vigor/summarize_run.py                       # latest k1_vigor_teacher_v3 run
     python scripts/vigor/summarize_run.py --run flat --points 10
-    python scripts/vigor/summarize_run.py --experiment k1_vigor_student_v2
+    python scripts/vigor/summarize_run.py --experiment k1_vigor_student_v3
 
 Each column is the mean over an equal slice of the iterations logged so far, labelled with the
 slice's last iteration.  Safe to run while training is still writing the run.
@@ -43,7 +43,7 @@ def fmt(v: float | None) -> str:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--log_root", default="logs/rsl_rl")
-    p.add_argument("--experiment", default="k1_vigor_teacher_v2")
+    p.add_argument("--experiment", default="k1_vigor_teacher_v3")
     p.add_argument("--run", default=None, help="run folder regex (latest if omitted)")
     p.add_argument("--points", type=int, default=8)
     p.add_argument("--tags", default=None, help="only tags matching this regex")

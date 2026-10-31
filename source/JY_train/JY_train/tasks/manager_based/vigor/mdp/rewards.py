@@ -29,18 +29,27 @@ def _command(env: ManagerBasedRLEnv, name: str) -> VigorKeyframeCommand:
     return env.command_manager.get_term(name)
 
 
+def _height_gate(c: VigorKeyframeCommand, sigma: float | None, margin: float = 0.05) -> torch.Tensor | float:
+    """exp(-(shortfall / sigma)^2) for a root lower than the reference's (B-Human get-up reward):
+    matching the limbs while lying when the reference has already risen earns nothing."""
+    if not sigma:
+        return 1.0
+    shortfall = (c.ref_root_height() - c.robot_root_height() - margin).clamp_min(0.0)
+    return torch.exp(-(shortfall / sigma).square())
+
+
 # ----------------------------------------------------------------- imitation
-def track_body_pos_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+def track_body_pos_exp(env: ManagerBasedRLEnv, command_name: str, std: float, height_sigma: float | None = None) -> torch.Tensor:
     c = _command(env, command_name)
     err = (c.ref_rel_body_pos() - c.robot_rel_body_pos()).square().sum(-1).mean(-1)
-    return torch.exp(-err / std**2)
+    return torch.exp(-err / std**2) * _height_gate(c, height_sigma)
 
 
-def track_body_rot_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+def track_body_rot_exp(env: ManagerBasedRLEnv, command_name: str, std: float, height_sigma: float | None = None) -> torch.Tensor:
     c = _command(env, command_name)
     robot_q = c.robot.data.body_quat_w[:, c.body_ids]
     err = quat_error_magnitude(c.ref_body_quat(), robot_q).square().mean(-1)
-    return torch.exp(-err / std**2)
+    return torch.exp(-err / std**2) * _height_gate(c, height_sigma)
 
 
 def track_body_lin_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
@@ -55,11 +64,11 @@ def track_body_ang_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float
     return torch.exp(-err / std**2)
 
 
-def track_joint_pos_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
+def track_joint_pos_exp(env: ManagerBasedRLEnv, command_name: str, std: float, height_sigma: float | None = None) -> torch.Tensor:
     c = _command(env, command_name)
     ref = c.data.joint_pos[c.frame][:, c.joint_map][:, c.action_joint_ids]
     err = (ref - c.robot.data.joint_pos[:, c.action_joint_ids]).square().mean(-1)
-    return torch.exp(-err / std**2)
+    return torch.exp(-err / std**2) * _height_gate(c, height_sigma)
 
 
 def track_joint_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:
@@ -67,6 +76,27 @@ def track_joint_vel_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -
     ref = c.data.joint_vel[c.frame][:, c.joint_map][:, c.action_joint_ids] * c.speed.unsqueeze(-1)
     err = (ref - c.robot.data.joint_vel[:, c.action_joint_ids]).square().mean(-1)
     return torch.exp(-err / std**2)
+
+
+# ------------------------------------------------------------ contacts
+def _touching(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    return sensor.data.net_forces_w[:, sensor_cfg.body_ids].norm(dim=-1) > threshold
+
+
+def ref_contact_match(env: ManagerBasedRLEnv, command_name: str, sensor_cfg: SceneEntityCfg, contact_ids: list[int],
+                      threshold: float = 1.0) -> torch.Tensor:
+    """Fraction of ``sensor_cfg`` bodies (one per ``contact_ids`` entry, same order) on the ground while the
+    reference has them there -- plants the hands when the reference braces."""
+    ref = _command(env, command_name).ref_contact()[:, contact_ids]
+    return (ref & _touching(env, sensor_cfg, threshold)).float().mean(-1)
+
+
+def unexpected_contact(env: ManagerBasedRLEnv, command_name: str, sensor_cfg: SceneEntityCfg, contact_id: int,
+                       threshold: float = 1.0) -> torch.Tensor:
+    """Any ``sensor_cfg`` body on the ground although the reference keeps that part off it."""
+    ref = _command(env, command_name).ref_contact()[:, contact_id]
+    return (_touching(env, sensor_cfg, threshold).any(-1) & ~ref).float()
 
 
 # ------------------------------------------------------- regularization/safety

@@ -7,7 +7,7 @@ interfaces cannot silently drift between machines.  Bump ``SPEC_VERSION``
 whenever a layout below changes; datasets and exported policies record it.
 """
 
-SPEC_VERSION = "k1-vigor-v2"
+SPEC_VERSION = "k1-vigor-v3"
 
 # ---------------------------------------------------------------------------
 # Kinematic names (pre-rename booster_assets naming, same as the walking tasks)
@@ -58,6 +58,14 @@ KEY_BODY_NAMES = [
 ]
 HEAD_BODY_NAMES = ["Head_1", "Head_2"]
 FOOT_BODY_NAMES = ["left_foot_link", "right_foot_link"]
+# Ground contacts recorded per reference frame (dataset ``ref_contact``): the hands are
+# rewarded for touching when the reference does, head and trunk are penalised when they
+# touch although the reference does not.
+REF_CONTACT_NAMES = ["left_hand", "right_hand", "head", "trunk"]
+REF_CONTACT_BODIES = [["left_hand_link"], ["right_hand_link"], HEAD_BODY_NAMES, ["Trunk"]]
+# m above the lowest point of the pose; looser for head/trunk, whose box-approximated
+# collision shapes leave them a few cm up even when lying on them
+REF_CONTACT_TOL = [0.025, 0.025, 0.05, 0.05]
 
 # ---------------------------------------------------------------------------
 # Timing (identical to the walking tasks so actuator delays mean the same)

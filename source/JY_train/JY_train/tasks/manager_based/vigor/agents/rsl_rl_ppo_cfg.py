@@ -19,7 +19,7 @@ class VigorTeacherPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
     save_interval = 500
-    experiment_name = "k1_vigor_teacher_v2"  # v1 (heading-frame tracking) runs stay in k1_vigor_teacher
+    experiment_name = "k1_vigor_teacher_v3"  # v1/v2 runs stay in k1_vigor_teacher / k1_vigor_teacher_v2
     empirical_normalization = True
     policy = VigorTeacherActorCriticCfg(
         init_noise_std=0.5,  # with the doubled action scale this keeps joint-space noise unchanged
@@ -47,8 +47,8 @@ class VigorTeacherPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class VigorDistillCfg:
     """Student distillation (scripts/vigor/distill.py): BC + DAgger with latent supervision."""
 
-    experiment_name: str = "k1_vigor_student_v2"
-    teacher_experiment_name: str = "k1_vigor_teacher_v2"
+    experiment_name: str = "k1_vigor_student_v3"
+    teacher_experiment_name: str = "k1_vigor_teacher_v3"
     seed: int = 42
     device: str = "cuda:0"
     num_steps_per_env: int = 24
