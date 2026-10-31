@@ -204,16 +204,23 @@ class EventCfg:
 class RewardsCfg:
     """Paper Table I."""
 
-    # motion imitation (root-relative, heading-invariant)
-    track_body_pos = RewTerm(func=mdp.track_body_pos_exp, weight=1.25, params={"command_name": "motion", "std": 0.3})
-    track_body_rot = RewTerm(func=mdp.track_body_rot_exp, weight=0.5, params={"command_name": "motion", "std": 0.4})
+    # motion imitation (root-relative, heading-invariant); the pose terms pay nothing while the root
+    # sits more than 5 cm below the reference's (B-Human get-up), so lying with matching limbs does not pay
+    track_body_pos = RewTerm(
+        func=mdp.track_body_pos_exp, weight=1.25, params={"command_name": "motion", "std": 0.3, "height_sigma": 0.1}
+    )
+    track_body_rot = RewTerm(
+        func=mdp.track_body_rot_exp, weight=0.5, params={"command_name": "motion", "std": 0.4, "height_sigma": 0.1}
+    )
     track_body_lin_vel = RewTerm(
         func=mdp.track_body_lin_vel_exp, weight=0.125, params={"command_name": "motion", "std": 1.0}
     )
     track_body_ang_vel = RewTerm(
         func=mdp.track_body_ang_vel_exp, weight=0.125, params={"command_name": "motion", "std": 3.14}
     )
-    track_joint_pos = RewTerm(func=mdp.track_joint_pos_exp, weight=0.5, params={"command_name": "motion", "std": 0.5})
+    track_joint_pos = RewTerm(
+        func=mdp.track_joint_pos_exp, weight=0.5, params={"command_name": "motion", "std": 0.5, "height_sigma": 0.1}
+    )
     track_joint_vel = RewTerm(func=mdp.track_joint_vel_exp, weight=0.125, params={"command_name": "motion", "std": 3.0})
     # regularization & safety
     torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-6)
@@ -229,17 +236,34 @@ class RewardsCfg:
     )
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-1.0e-4)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.1)
-    # the head houses the stereo camera; hands/forearms/knees may touch the ground
-    undesired_contacts = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=spec.HEAD_BODY_NAMES), "threshold": 1.0},
+    # contacts against the reference: plant the hands when it braces; head (stereo camera) and trunk
+    # may only touch where the reference does (the K1 get-ups lean on the head while pushing up)
+    hand_contact = RewTerm(
+        func=mdp.ref_contact_match,
+        weight=0.5,
+        params={
+            "command_name": "motion",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_hand_link", "right_hand_link"], preserve_order=True),
+            "contact_ids": [spec.REF_CONTACT_NAMES.index("left_hand"), spec.REF_CONTACT_NAMES.index("right_hand")],
+        },
     )
-    # brace on hands/knees instead of landing on the trunk
+    head_contact = RewTerm(
+        func=mdp.unexpected_contact,
+        weight=-1.0,
+        params={
+            "command_name": "motion",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=spec.HEAD_BODY_NAMES),
+            "contact_id": spec.REF_CONTACT_NAMES.index("head"),
+        },
+    )
     trunk_contact = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-0.2,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="Trunk"), "threshold": 1.0},
+        func=mdp.unexpected_contact,
+        weight=-0.5,
+        params={
+            "command_name": "motion",
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="Trunk"),
+            "contact_id": spec.REF_CONTACT_NAMES.index("trunk"),
+        },
     )
     # TODO(stairs): foothold edge penalty (BeamDojo) once stair terrains are used in training.
     # keep the head up: dense here (paper: post-recovery only) so catching a fall pays off

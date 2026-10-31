@@ -1,15 +1,20 @@
 {
   "datasets": {
-    "k1_fall_keyframes_v2.npz": {
-      "sha256": "481dc1d93ad397b050726da3ee497f548a232dcd09820caa0702a4604c3ee6dc",
-      "size_bytes": 13336363,
-      "spec_version": "k1-vigor-v2",
-      "segments": 80,
-      "arm_caught_segments": 38,
-      "frames": 23995,
+    "k1_fall_keyframes_v3.npz": {
+      "sha256": "8d3acb89c010ff76ad128c68fcc7436bc37e49ed9cc451177743ea2e1a401671",
+      "size_bytes": 11441846,
+      "spec_version": "k1-vigor-v3",
+      "segments": 101,
+      "arm_caught_segments": 16,
+      "frames": 31481,
       "fps": 50,
       "keyframe_stride": 10,
-      "source": "Ubisoft LAFAN1 (CC BY-NC-ND 4.0) fallAndGetUp*/pushAndFall*, retargeted with GMR",
+      "source": "Ubisoft LAFAN1 (CC BY-NC-ND 4.0) fallAndGetUp*/pushAndFall* falls retargeted with GMR, each continued with the K1 front/back get-up; plus synthetic forward brace-and-rise clips",
+      "k1_getup_source": "Inha-united-soccer/INHA-Recovery-Motion@d5fc894850e39fa229e6dca83e0c3f5683aeb8b7 src/inha_mjlab/tasks/getup/reference_poses.py (B-Human fast get-up, K1_fast.onnx sha256 adae2f00...)",
+      "getup_clips": {
+        "front": 48,
+        "back": 37
+      },
       "ik_config_sha256": "10ed55b6553c19a4394231663a1273a23c4ad0a0f93bc1c987d0eaf270713f9b",
       "gmr_commit": "25f56db79ac411258b377b6d4ccba0c8ff3372ac",
       "lafan1_zip_sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977",
@@ -17,7 +22,7 @@
       "build_args": {
         "retarget_dir": "<local>",
         "mesh_dir": "<local>",
-        "name": "k1_fall_keyframes_v2.npz",
+        "name": "k1_fall_keyframes_v3.npz",
         "out_dir": "<repo>/data/vigor",
         "fall_z": 0.4,
         "stand_ratio": 0.88,
@@ -26,10 +31,12 @@
         "min_duration": 1.5,
         "max_duration": 7.0,
         "max_joint_vel": 25.0,
+        "stand_hold": 1.5,
+        "brace_hips": "-1.8,-2.0,-2.2,-2.4",
         "lafan1_zip_sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977"
       },
-      "built_at_commit": "dff2fb0753cceee87f3cbaa8963dcaaa01eff96f",
-      "built_utc": "2026-10-31T02:14:02+00:00"
+      "built_at_commit": "a1a6bd9f0f53528d64fafc31c7dfae67bebc1d59",
+      "built_utc": "2026-10-31T06:03:29+00:00"
     }
   }
 }

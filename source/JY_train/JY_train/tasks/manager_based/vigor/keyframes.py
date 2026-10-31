@@ -30,7 +30,7 @@ DATA_DIR = os.environ.get("JY_VIGOR_DATA_DIR", os.path.join(REPO_ROOT, "data", "
 REQUIRED_KEYS = (
     "spec_version", "fps", "stride", "joint_names", "body_names", "clip_names", "clip_start", "clip_length",
     "fall_onset", "lowest", "getup_end", "fall_dir", "joint_pos", "joint_vel", "root_pos", "root_quat",
-    "body_pos", "body_quat", "body_lin_vel", "body_ang_vel",
+    "body_pos", "body_quat", "body_lin_vel", "body_ang_vel", "contact_names", "ref_contact",
 )
 
 
@@ -105,6 +105,9 @@ class KeyframeDataset:
         self.body_quat = t("body_quat")
         self.body_lin_vel = t("body_lin_vel")
         self.body_ang_vel = t("body_ang_vel")
+        if [str(n) for n in data["contact_names"]] != spec.REF_CONTACT_NAMES:
+            raise RuntimeError("Dataset contact_names differ from spec.REF_CONTACT_NAMES")
+        self.ref_contact = t("ref_contact", torch.bool)  # (frames, len(REF_CONTACT_NAMES))
         self.root_gravity = projected_gravity(self.root_quat)
         self.root_yaw = yaw_from_quat(self.root_quat)  # only used to pick the episode's yaw offset
         # Pose-intrinsic root height: independent of where the clip was grounded.
