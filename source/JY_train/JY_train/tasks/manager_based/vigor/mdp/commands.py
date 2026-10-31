@@ -82,6 +82,18 @@ class VigorKeyframeCommand(CommandTerm):
         self.metrics["error_body_pos"] = torch.zeros(n, device=self.device)
         self.metrics["error_joint_pos"] = torch.zeros(n, device=self.device)
         self.metrics["clip_progress"] = torch.zeros(n, device=self.device)
+        # Episode outcomes as in scripts/vigor/common.py RecoveryTracker, logged per start regime as
+        # sliding-window rates (Metrics/motion/<regime>/{success,full_fall,caught}) so arm bracing
+        # can be watched while training instead of only in eval.py.
+        from .rewards import head_height, upright_mask  # rewards imports this module
+
+        self._head_height, self._upright_mask = head_height, upright_mask
+        self._ep_steps = torch.zeros(n, dtype=torch.long, device=self.device)
+        self._upright_run = torch.zeros(n, device=self.device)
+        self._min_head = torch.full((n,), float("inf"), device=self.device)
+        self._outcomes = torch.zeros(len(REGIME_NAMES), cfg.outcome_window, 3, device=self.device)
+        self._outcome_ptr = [0] * len(REGIME_NAMES)
+        self._outcome_n = [0] * len(REGIME_NAMES)
 
     # ------------------------------------------------------------------ views
     @property
@@ -141,6 +153,47 @@ class VigorKeyframeCommand(CommandTerm):
         ref_q = self.data.joint_pos[self.frame][:, self.joint_map]
         self.metrics["error_joint_pos"] = (ref_q - self.robot.data.joint_pos)[:, self.action_joint_ids].abs().mean(-1)
         self.metrics["clip_progress"] = self.cursor / self.data.clip_length[self.clip].float()
+
+        live = self._ep_steps > 0  # skip the reading taken right after the reset wrote the start state
+        h = self._head_height(self._env, self.robot, self.cfg.height_sensor_name)
+        up = self._upright_mask(self._env, sensor_name=self.cfg.height_sensor_name) & live
+        self._min_head = torch.where(live, torch.minimum(self._min_head, h), self._min_head)
+        self._upright_run = torch.where(up, self._upright_run + self._env.step_dt, torch.zeros_like(self._upright_run))
+        self._ep_steps += 1
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
+        ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else torch.as_tensor(
+            env_ids, dtype=torch.long, device=self.device
+        )
+        extras = self._log_outcomes(ids)  # before super().reset() resamples the regime
+        self._ep_steps[ids] = 0
+        self._upright_run[ids] = 0.0
+        self._min_head[ids] = float("inf")
+        return extras | super().reset(env_ids)
+
+    def _log_outcomes(self, ids: torch.Tensor) -> dict[str, float]:
+        # full-length episodes only: skips the random initial episode lengths and the first reset
+        steps = self._ep_steps[ids]
+        done = (steps >= int(0.9 * self._env.max_episode_length)) | (self._env.termination_manager.terminated[ids] & (steps > 1))
+        ids = ids[done]
+        if len(ids):
+            success = self._upright_run[ids] >= self.cfg.success_stable_s
+            fell = self._min_head[ids] < spec.FULL_FALL_HEAD_HEIGHT
+            out = torch.stack((success, fell, success & ~fell), dim=-1).float()
+            regime, w = self.regime[ids], self.cfg.outcome_window
+            for r in range(len(REGIME_NAMES)):
+                rows = out[regime == r][-w:]
+                if len(rows):
+                    slots = (self._outcome_ptr[r] + torch.arange(len(rows), device=self.device)) % w
+                    self._outcomes[r, slots] = rows
+                    self._outcome_ptr[r] = (self._outcome_ptr[r] + len(rows)) % w
+                    self._outcome_n[r] = min(self._outcome_n[r] + len(rows), w)
+        extras = {}
+        for r, name in enumerate(REGIME_NAMES):
+            if self._outcome_n[r]:
+                success, fell, caught = self._outcomes[r, : self._outcome_n[r]].mean(dim=0).tolist()
+                extras |= {f"{name}/success": success, f"{name}/full_fall": fell, f"{name}/caught": caught}
+        return extras
 
     def _update_command(self):
         self.cursor += self.speed * self.data.fps * self._env.step_dt
@@ -292,6 +345,9 @@ class VigorKeyframeCommandCfg(CommandTermCfg):
     push_lin_speed: tuple[float, float] = (0.6, 1.8)
     push_lead_s: float = 0.2  # reference starts this long before its fall onset
     playback_speed_range: tuple[float, float] = (0.8, 1.1)
+    # training-time outcome logging: rates over the last ``outcome_window`` episodes of each regime
+    outcome_window: int = 1000
+    success_stable_s: float = 0.5  # same as RecoveryTracker.stable_s
 
     joint_pos_noise: float = 0.1
     joint_vel_noise: float = 0.3

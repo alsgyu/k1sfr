@@ -88,10 +88,18 @@ python scripts/vigor/play_walk_fall.py --headless --video \
 ```
 
 Iteration counts are starting points, not tuned values (an RTX 5080 laptop runs ~3.4 s/iteration at
-4096 envs). Watch `Episode_Reward/track_body_pos`, `Episode_Reward/head_height`,
-`Metrics/motion/error_body_pos`, and in the eval summary `SR` (ends upright), `caught` (upright
-without a full fall; the arm-bracing behaviour, mostly in the push / handover regimes) and
-`head_contact_rate`. Paper teacher: SR 98 % stand-up / 96 % fall-recovery.
+4096 envs). The command term logs the eval outcome definitions while training, as rates over the
+last 1000 full-length episodes of each start regime: `Metrics/motion/<regime>/success` (ends
+upright), `.../full_fall` (head below 0.35 m) and `.../caught` (upright without a full fall; the
+arm-bracing behaviour, mostly in the push / handover regimes). Print them with the tracking
+error and reward terms as a text table, also while the run is still going:
+
+```bash
+python scripts/vigor/summarize_run.py --run flat
+```
+
+The eval summary reports the same keys per regime plus `head_contact_rate`. Paper teacher:
+SR 98 % stand-up / 96 % fall-recovery.
 
 ## Laptop (data prep, no Isaac)
 
