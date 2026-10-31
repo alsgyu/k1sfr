@@ -38,6 +38,8 @@ overhead): human get-ups do not fit the K1, so the stand-up part could not be tr
   the reference keeps them off the ground (the K1 get-ups lean on the head)
 - the pose-imitation terms are multiplied by a height gate (B-Human): no reward while the root is
   more than 5 cm below the reference's, so lying down with matching limbs no longer pays
+- a full fall is now the trunk dropping below 0.25 m (the brace pike puts the head ~12 cm off the
+  ground with the trunk ~0.37 m up), and the head-height reward only pays once upright (paper)
 - experiments are `k1_vigor_teacher_v3` / `k1_vigor_student_v3`
 
 ### v2 (2026-10-31) - what changed after the first flat teacher failed (0 % recoveries)
@@ -111,7 +113,7 @@ python scripts/vigor/play_walk_fall.py --headless --video \
 Iteration counts are starting points, not tuned values (an RTX 5080 laptop runs ~3.4 s/iteration at
 4096 envs). The command term logs the eval outcome definitions while training, as rates over the
 last 1000 full-length episodes of each start regime: `Metrics/motion/<regime>/success` (ends
-upright), `.../full_fall` (head below 0.35 m) and `.../caught` (upright without a full fall; the
+upright), `.../full_fall` (trunk below 0.25 m) and `.../caught` (upright without a full fall; the
 arm-bracing behaviour, mostly in the push / handover regimes). Print them with the tracking
 error and reward terms as a text table, also while the run is still going:
 

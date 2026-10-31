@@ -85,12 +85,12 @@ class VigorKeyframeCommand(CommandTerm):
         # Episode outcomes as in scripts/vigor/common.py RecoveryTracker, logged per start regime as
         # sliding-window rates (Metrics/motion/<regime>/{success,full_fall,caught}) so arm bracing
         # can be watched while training instead of only in eval.py.
-        from .rewards import head_height, upright_mask  # rewards imports this module
+        from .rewards import trunk_height, upright_mask  # rewards imports this module
 
-        self._head_height, self._upright_mask = head_height, upright_mask
+        self._trunk_height, self._upright_mask = trunk_height, upright_mask
         self._ep_steps = torch.zeros(n, dtype=torch.long, device=self.device)
         self._upright_run = torch.zeros(n, device=self.device)
-        self._min_head = torch.full((n,), float("inf"), device=self.device)
+        self._min_trunk = torch.full((n,), float("inf"), device=self.device)
         self._outcomes = torch.zeros(len(REGIME_NAMES), cfg.outcome_window, 3, device=self.device)
         self._outcome_ptr = [0] * len(REGIME_NAMES)
         self._outcome_n = [0] * len(REGIME_NAMES)
@@ -167,9 +167,9 @@ class VigorKeyframeCommand(CommandTerm):
         self.metrics["clip_progress"] = self.cursor / self.data.clip_length[self.clip].float()
 
         live = self._ep_steps > 0  # skip the reading taken right after the reset wrote the start state
-        h = self._head_height(self._env, self.robot, self.cfg.height_sensor_name)
+        h = self._trunk_height(self._env, self.robot, self.cfg.height_sensor_name)
         up = self._upright_mask(self._env, sensor_name=self.cfg.height_sensor_name) & live
-        self._min_head = torch.where(live, torch.minimum(self._min_head, h), self._min_head)
+        self._min_trunk = torch.where(live, torch.minimum(self._min_trunk, h), self._min_trunk)
         self._upright_run = torch.where(up, self._upright_run + self._env.step_dt, torch.zeros_like(self._upright_run))
         self._ep_steps += 1
 
@@ -180,7 +180,7 @@ class VigorKeyframeCommand(CommandTerm):
         extras = self._log_outcomes(ids)  # before super().reset() resamples the regime
         self._ep_steps[ids] = 0
         self._upright_run[ids] = 0.0
-        self._min_head[ids] = float("inf")
+        self._min_trunk[ids] = float("inf")
         return extras | super().reset(env_ids)
 
     def _log_outcomes(self, ids: torch.Tensor) -> dict[str, float]:
@@ -190,7 +190,7 @@ class VigorKeyframeCommand(CommandTerm):
         ids = ids[done]
         if len(ids):
             success = self._upright_run[ids] >= self.cfg.success_stable_s
-            fell = self._min_head[ids] < spec.FULL_FALL_HEAD_HEIGHT
+            fell = self._min_trunk[ids] < spec.FULL_FALL_TRUNK_HEIGHT
             out = torch.stack((success, fell, success & ~fell), dim=-1).float()
             regime, w = self.regime[ids], self.cfg.outcome_window
             for r in range(len(REGIME_NAMES)):
