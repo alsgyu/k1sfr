@@ -143,21 +143,28 @@ def test_safefall_math():
     import safefall_math as sf
 
     st = sf.sample_starts(4096)
+    falls = st["plank"] < 0
     cos_tilt = 1 - 2 * (st["root_quat"][:, 1] ** 2 + st["root_quat"][:, 2] ** 2)  # trunk z-axis vs world z
-    assert torch.allclose(cos_tilt, torch.cos(st["tilt"]), atol=1e-5) and st["tilt"].max() <= math.radians(30.0) + 1e-6
+    assert torch.allclose(cos_tilt[falls], torch.cos(st["tilt"])[falls], atol=1e-5) and st["tilt"].max() <= math.radians(30.0) + 1e-6
     lean = st["root_rel"][:, :2] / st["root_rel"][:, :2].norm(dim=-1, keepdim=True).clamp_min(1e-9)
     moving = st["tilt"] > 0.05
     assert ((lean * st["lin_vel"][:, :2]).sum(-1)[moving] > 0).all()  # falls the way it leans
     # tipping forward puts the chest down, backward the chest up
-    assert torch.allclose(sf.chest_z(st["root_quat"]), -torch.sin(st["tilt"]) * st["facing"], atol=1e-5)
+    assert torch.allclose(sf.chest_z(st["root_quat"])[falls], (-torch.sin(st["tilt"]) * st["facing"])[falls], atol=1e-5)
     assert (st["facing"][st["direction"] == 0] > 0.7).all() and (st["facing"][st["direction"] == 1] < -0.7).all()
+    held = st["plank"] >= 0  # plank starts: chest down in front, up in back, at rest
+    assert 0.1 < held.float().mean() < 0.3 and (st["direction"][held] == len(sf.DIRECTIONS)).all()
+    assert (sf.chest_z(st["root_quat"])[st["plank"] == 0] < -0.8).all() and (sf.chest_z(st["root_quat"])[st["plank"] == 1] > 0.3).all()
+    assert (st["lin_vel"][held] == 0).all() and torch.equal(st["facing"][held], 1.0 - 2.0 * st["plank"][held].float())
     n = 4
     z = torch.zeros(n)
 
-    def state(trunk_h, chest_z=-0.9, facing=1.0, **force):
+    def state(trunk_h, chest_z=-0.9, facing=1.0, head_h=0.3, q=None, **force):
         f = {g: z + force.get(g, 0.0) * sf.WEIGHT for g in sf.CONTACT_GROUPS}
-        return sf.FallState(force=f, head_h=z + 0.15, trunk_h=z + trunk_h, hand_h=z + 0.02, head_vz=z, trunk_vz=z, up=z,
-                            chest_z=z + chest_z, facing=z + facing)
+        q = torch.tensor(sf.PLANK_POSES["front" if chest_z < 0 else "back"]) if q is None else torch.as_tensor(q)
+        grav = torch.tensor([-chest_z, 0.0, -math.sqrt(1 - chest_z**2)]).expand(n, 3)
+        return sf.FallState(force=f, head_h=z + head_h, trunk_h=z + trunk_h, hand_h=z + 0.02, head_vz=z, trunk_vz=z,
+                            gravity_b=grav, q=q.float().expand(n, -1), facing=z + facing)
 
     plank, _ = sf.reward(state(0.28, fist_l=0.3, fist_r=0.3, feet=0.4), 0.02)
     kneeling, _ = sf.reward(state(0.3, fist_l=0.2, fist_r=0.2, legs=0.4, feet=0.2), 0.02)
@@ -170,6 +177,27 @@ def test_safefall_math():
     turned, _ = sf.reward(state(**table), 0.02)
     backward, _ = sf.reward(state(**table | {"facing": -1.0}), 0.02)
     assert (turned < 0).all() and torch.allclose(backward, plank)
+    # the plank pays more in its hand-off pose; the pose follows the chest side
+    planks = dict(trunk_h=0.28, fist_l=0.3, fist_r=0.3, feet=0.4)
+    off_pose, _ = sf.reward(state(**planks, q=torch.tensor(sf.PLANK_POSES["front"]) + 0.4), 0.02)
+    assert (plank > off_pose).all()
+    assert torch.allclose(sf.terms(state(**table | {"facing": -1.0}))["plank_pose"], torch.ones(n))
+    assert (sf.terms(state(**planks))["plank_pose"] == 1).all() and (sf.pose_error(state(**planks)) == 0).all()
+    # head about to touch costs before contact
+    low_head, _ = sf.reward(state(**planks, head_h=0.08), 0.02)
+    assert (low_head < plank).all()
+    # zero action targets the hand-off plank on the side the chest faces
+    assert spec.ACTION_JOINT_NAMES == spec.ALL_JOINT_NAMES[len(spec.HEAD_JOINT_NAMES):]
+    reflex = sf.reflex_targets(torch.tensor([[0.914, 0.0, -0.405], [-0.376, 0.0, -0.927], [0.0, 0.0, -1.0]]))  # the two planks, upright
+    assert torch.allclose(reflex[0], torch.tensor(sf.PLANK_POSES["front"][2:]), atol=1e-2)
+    assert torch.allclose(reflex[1], torch.tensor(sf.PLANK_POSES["back"][2:]), atol=1e-2)
+    assert torch.allclose(reflex[2], 0.5 * (reflex[0] + reflex[1]), atol=1e-2)
+    # the tracker hands the last-step pose to end_poses (what the get-up team receives)
+    tr = sf.OutcomeTracker(n)
+    tr.update(state(**planks))
+    ends = sf.end_poses(tr.close(torch.arange(n)))
+    assert ends["front"]["episodes"] == n and ends["back"]["episodes"] == 0
+    assert torch.allclose(torch.tensor(ends["front"]["joint_pos_median"]), torch.tensor(sf.PLANK_POSES["front"]), atol=1e-3)
 
 
 def test_teacher_ppo():
