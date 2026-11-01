@@ -139,19 +139,31 @@ def test_k1_getup_stance():
 
 
 def test_safefall_math():
-    """Start states tip the stance the way they claim; the reward prefers an arm-braced landing."""
+    """Starts stand upright on the ground and are pushed the way they claim; the reward prefers an
+    arm-braced landing."""
     import safefall_math as sf
 
     st = sf.sample_starts(4096)
     falls = st["plank"] < 0
     cos_tilt = 1 - 2 * (st["root_quat"][:, 1] ** 2 + st["root_quat"][:, 2] ** 2)  # trunk z-axis vs world z
-    assert torch.allclose(cos_tilt[falls], torch.cos(st["tilt"])[falls], atol=1e-5) and st["tilt"].max() <= math.radians(30.0) + 1e-6
-    lean = st["root_rel"][:, :2] / st["root_rel"][:, :2].norm(dim=-1, keepdim=True).clamp_min(1e-9)
-    moving = st["tilt"] > 0.05
-    assert ((lean * st["lin_vel"][:, :2]).sum(-1)[moving] > 0).all()  # falls the way it leans
-    # tipping forward puts the chest down, backward the chest up
-    assert torch.allclose(sf.chest_z(st["root_quat"])[falls], (-torch.sin(st["tilt"]) * st["facing"])[falls], atol=1e-5)
+    assert torch.allclose(cos_tilt[falls], torch.ones(int(falls.sum())), atol=1e-6)  # standing upright
+    assert torch.allclose(st["root_rel"][falls, 2], torch.full((int(falls.sum()),), spec.TRUNK_HEIGHT_NOMINAL))
+    heading = torch.stack((1 - 2 * (st["root_quat"][:, 2] ** 2 + st["root_quat"][:, 3] ** 2),
+                           2 * (st["root_quat"][:, 1] * st["root_quat"][:, 2] + st["root_quat"][:, 0] * st["root_quat"][:, 3])), -1)
+    walk_speed = (st["lin_vel"][:, :2] * heading).sum(-1)  # forward speed (push included)
+    assert (st["lin_vel"][:, 2] == 0).all() and (st["lin_vel"][falls, :2].norm(dim=-1) > 0).all()  # a push against the walk can nearly cancel it
+    assert ((walk_speed[st["direction"] == 0]) > 0.6 * math.cos(math.pi / 4) - 1e-6).all()  # pushed forward
+    # walking starts lift one leg, the ankle keeps the sole flat; standing starts lift none
+    names = spec.ALL_JOINT_NAMES
+    knees = st["joint_offset"][:, [names.index("Left_Knee_Pitch"), names.index("Right_Knee_Pitch")]]
+    assert ((knees > 0).sum(-1) == st["walk"].long()).all() and (knees.max(-1).values[st["walk"]] >= 0.3).all()
+    sole = sum(st["joint_offset"][:, [names.index(f"{s}_{j}") for s in ("Left", "Right")]] for j in ("Hip_Pitch", "Knee_Pitch", "Ankle_Pitch"))
+    assert torch.allclose(sole, torch.zeros_like(sole), atol=1e-6)
     assert (st["facing"][st["direction"] == 0] > 0.7).all() and (st["facing"][st["direction"] == 1] < -0.7).all()
+    # the facing set at the trigger follows the tilt direction
+    g = torch.tensor([[math.sin(0.4), 0.0, -math.cos(0.4)], [-math.sin(0.4), 0.0, -math.cos(0.4)], [0.0, math.sin(0.4), -math.cos(0.4)]])
+    assert torch.allclose(sf.facing_from_gravity(g), torch.tensor([1.0, -1.0, 0.0]), atol=1e-6)
+    assert math.isclose(sf.TRIGGER_COS, math.cos(math.radians(20.0)))
     held = st["plank"] >= 0  # plank starts: chest down in front, up in back, at rest
     assert 0.1 < held.float().mean() < 0.3 and (st["direction"][held] == len(sf.DIRECTIONS)).all()
     assert (sf.chest_z(st["root_quat"])[st["plank"] == 0] < -0.8).all() and (sf.chest_z(st["root_quat"])[st["plank"] == 1] > 0.3).all()

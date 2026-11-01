@@ -15,7 +15,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 
 
 class _DropoutState:
@@ -115,3 +115,19 @@ def torque_dropout_step(env: ManagerBasedRLEnv, env_ids: torch.Tensor, probabili
     chosen = idle[torch.rand(len(idle), device=env.device) < probability_per_s * env.step_dt]
     joint_ids = torch.arange(asset.num_joints, device=env.device)[asset_cfg.joint_ids]
     _start(env, st, chosen, joint_ids, joint_fraction, duration_s)
+
+
+def randomize_trunk_com(env: ManagerBasedEnv, env_ids: torch.Tensor | None, com_range: dict[str, tuple[float, float]],
+                        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names="Trunk")):
+    """Shift the CoM of ``asset_cfg``'s bodies by a uniform offset per env (startup; PhysX takes CPU
+    tensors).  Same as beyond_mimic's randomize_rigid_body_com, kept here so this task does not import
+    that package."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    env_ids = torch.arange(env.scene.num_envs, device="cpu") if env_ids is None else env_ids.cpu()
+    body_ids = (torch.arange(asset.num_bodies, dtype=torch.int) if asset_cfg.body_ids == slice(None)
+                else torch.tensor(asset_cfg.body_ids, dtype=torch.int))
+    ranges = torch.tensor([com_range.get(k, (0.0, 0.0)) for k in ("x", "y", "z")])
+    offset = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * torch.rand(len(env_ids), 1, 3)
+    coms = asset.root_physx_view.get_coms().clone()
+    coms[env_ids[:, None], body_ids[None, :], :3] += offset
+    asset.root_physx_view.set_coms(coms, env_ids)

@@ -18,14 +18,18 @@ import torch
 
 try:
     from . import spec
-    from .torch_math import quat_apply, quat_from_axis_angle, quat_from_yaw, quat_mul
+    from .torch_math import quat_from_axis_angle, quat_from_yaw, quat_mul
 except ImportError:  # loaded as a top-level module by the laptop-side scripts
     import spec
-    from torch_math import quat_apply, quat_from_axis_angle, quat_from_yaw, quat_mul
+    from torch_math import quat_from_axis_angle, quat_from_yaw, quat_mul
 
 MASS = 19.67  # K1_22dof_jy.urdf total mass [kg]
 WEIGHT = MASS * 9.81
-EPISODE_S = 4.0  # fall (~0.6 s) + holding the plank
+EPISODE_S = 5.0  # pushed until the trigger (~0.2-1 s) + landing and holding the plank
+# The fall detector on the robot: the safe-fall policy takes over from the walking policy once the
+# IMU tilt reaches this; until then its actions are ignored and nothing is rewarded.
+TRIGGER_TILT_DEG = 20.0
+TRIGGER_COS = math.cos(math.radians(TRIGGER_TILT_DEG))
 
 # links with collision shapes, grouped; only fists and feet may touch the ground
 CONTACT_GROUPS = {
@@ -236,42 +240,53 @@ def reward(s: FallState, dt: float) -> tuple[torch.Tensor, dict[str, torch.Tenso
 
 
 # --------------------------------------------------------------------- starts
-# The walking stance tipping (hand-off from the walking policy) or pushed, in a direction
-# relative to the heading: (azimuth, probability), each spread +-45 deg.
+# Standing on the ground, or walking (forward speed, one foot lifted mid-swing), then pushed in a
+# direction relative to the heading: (azimuth, probability), each spread +-45 deg.  Before the
+# trigger the env holds the start pose (the walking policy's job on the robot), so the policy starts
+# from whatever state a push leaves the robot in at 20 deg.
 DIRECTIONS = ((0.0, 0.45), (math.pi, 0.2), (math.pi / 2, 0.175), (-math.pi / 2, 0.175))
 DIRECTION_NAMES = ("forward", "backward", "left", "right", "plank")
 # Episodes that start already held in a hand-off plank (front or back, joints jittered): the policy
 # experiences the target poses and learns to hold them, which a fall alone rarely reaches.  Their
 # direction is "plank"; eval scripts set this to 0 so they measure falls only.
 PLANK_START_PROB = 0.2
-TIP_PROB = 0.7
-TIP_TILT_DEG, TIP_OMEGA, TIP_SPEED = (10.0, 30.0), (0.5, 2.5), (0.0, 0.6)
-PUSH_TILT_DEG, PUSH_OMEGA, PUSH_SPEED = (0.0, 5.0), (0.0, 1.0), (0.8, 2.0)
+WALK_PROB = 0.5
+WALK_SPEED = (0.2, 0.6)  # m/s along the heading
+SWING_HIP, SWING_KNEE = (-0.4, -0.1), (0.3, 0.7)  # extra flexion of the lifted leg [rad]; ankle keeps the sole flat
+PUSH_SPEED = (0.6, 1.8)  # trunk velocity change of the push [m/s]
 
 
 def _u(lo: float, hi: float, n: int, device) -> torch.Tensor:
     return lo + (hi - lo) * torch.rand(n, device=device)
 
 
+def facing_from_gravity(gravity_b: torch.Tensor) -> torch.Tensor:
+    """cos of the tilt direction from the heading (+1 tipping forward, -1 backward, 0 sideways)."""
+    return gravity_b[:, 0] / gravity_b[:, :2].norm(dim=-1).clamp_min(1e-6)
+
+
 def sample_starts(n: int, device="cpu") -> dict[str, torch.Tensor]:
-    """Root state of the stance rotated about a ground pivot under the feet (world frame, pivot at the origin)."""
+    """Root state (world frame, root above the origin; the env grounds the feet), joint offsets from the
+    stance (canonical order: the lifted leg of walking starts), and the push; or a hand-off plank."""
     yaw = _u(-math.pi, math.pi, n, device)
     direction = torch.multinomial(torch.tensor([p for _, p in DIRECTIONS], device=device), n, replacement=True)
     azim = torch.tensor([a for a, _ in DIRECTIONS], device=device)[direction] + _u(-math.pi / 4, math.pi / 4, n, device)
-    tip = torch.rand(n, device=device) < TIP_PROB
-    tilt = torch.deg2rad(torch.where(tip, _u(*TIP_TILT_DEG, n, device), _u(*PUSH_TILT_DEG, n, device)))
-    omega = torch.where(tip, _u(*TIP_OMEGA, n, device), _u(*PUSH_OMEGA, n, device))
-    speed = torch.where(tip, _u(*TIP_SPEED, n, device), _u(*PUSH_SPEED, n, device))
     zeros = torch.zeros(n, device=device)
-    dir_w = torch.stack((torch.cos(yaw + azim), torch.sin(yaw + azim), zeros), -1)
-    axis = torch.stack((-dir_w[:, 1], dir_w[:, 0], zeros), -1)  # tipping towards dir_w
-    q_tilt = quat_from_axis_angle(axis, tilt)
-    root_quat = quat_mul(q_tilt, quat_from_yaw(yaw))
-    up = torch.tensor([0.0, 0.0, spec.TRUNK_HEIGHT_NOMINAL], device=device).expand(n, 3)
-    root_rel = quat_apply(q_tilt, up)
-    ang_vel = axis * omega.unsqueeze(-1)
-    lin_vel = torch.cross(ang_vel, root_rel, dim=-1) + dir_w * speed.unsqueeze(-1)
-    facing = torch.cos(azim)
+    heading = torch.stack((torch.cos(yaw), torch.sin(yaw), zeros), -1)
+    push = torch.stack((torch.cos(yaw + azim), torch.sin(yaw + azim), zeros), -1) * _u(*PUSH_SPEED, n, device).unsqueeze(-1)
+    walk = torch.rand(n, device=device) < WALK_PROB
+    lin_vel = push + heading * (walk * _u(*WALK_SPEED, n, device)).unsqueeze(-1)
+    root_quat = quat_from_yaw(yaw)
+    root_rel = torch.stack((zeros, zeros, zeros + spec.TRUNK_HEIGHT_NOMINAL), -1)
+    names = spec.ALL_JOINT_NAMES
+    joint_offset = torch.zeros(n, len(names), device=device)
+    left = torch.rand(n, device=device) < 0.5
+    hip, knee = _u(*SWING_HIP, n, device) * walk, _u(*SWING_KNEE, n, device) * walk
+    for side, swing in (("Left", left), ("Right", ~left)):
+        joint_offset[:, names.index(f"{side}_Hip_Pitch")] = hip * swing
+        joint_offset[:, names.index(f"{side}_Knee_Pitch")] = knee * swing
+        joint_offset[:, names.index(f"{side}_Ankle_Pitch")] = -(hip + knee) * swing
+    facing = torch.cos(azim)  # until the trigger, which sets it from the actual tilt direction
     # plank starts: -1 none, 0 front, 1 back (the env sets the joints to PLANK_POSES)
     plank = torch.where(torch.rand(n, device=device) < PLANK_START_PROB, torch.randint(0, 2, (n,), device=device), -1)
     on = plank >= 0
@@ -280,9 +295,10 @@ def sample_starts(n: int, device="cpu") -> dict[str, torch.Tensor]:
     y_axis = torch.tensor([0.0, 1.0, 0.0], device=device).expand(n, 3)
     root_quat = torch.where(on.unsqueeze(-1), quat_mul(quat_from_yaw(yaw), quat_from_axis_angle(y_axis, pitch)), root_quat)
     root_rel = torch.where(on.unsqueeze(-1), torch.stack((zeros, zeros, height), -1), root_rel)
-    lin_vel, ang_vel = (torch.where(on.unsqueeze(-1), torch.zeros_like(v), v) for v in (lin_vel, ang_vel))
-    return {"root_quat": root_quat, "root_rel": root_rel, "lin_vel": lin_vel, "ang_vel": ang_vel,
-            "direction": torch.where(on, len(DIRECTIONS), direction), "tilt": torch.where(on, zeros, tilt),
+    lin_vel = torch.where(on.unsqueeze(-1), torch.zeros_like(lin_vel), lin_vel)
+    return {"root_quat": root_quat, "root_rel": root_rel, "lin_vel": lin_vel, "ang_vel": torch.zeros_like(lin_vel),
+            "joint_offset": torch.where(on.unsqueeze(-1), torch.zeros_like(joint_offset), joint_offset),
+            "direction": torch.where(on, len(DIRECTIONS), direction), "walk": walk & ~on,
             "facing": torch.where(on, 1.0 - 2.0 * plank.float(), facing), "plank": plank}
 
 

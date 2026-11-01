@@ -10,6 +10,7 @@ from isaaclab.managers import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
 from .. import safefall_math as sf
+from .safefall import update_trigger
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -53,7 +54,9 @@ class HoldJointPositionActionCfg(ActionTermCfg):
 
 
 class ReflexJointPositionAction(JointPositionAction):
-    """Joint position targets = ``safefall_math.reflex_targets(projected gravity)`` + scale * action.
+    """Joint position targets = ``safefall_math.reflex_targets(projected gravity)`` + scale * action,
+    from the step the fall detector triggers (``update_trigger``); before that the start pose is held
+    and the actions are ignored (on the robot the walking policy runs until then).
 
     Zero action falls into the hand-off plank on the side the chest faces and holds it; the policy
     learns offsets from there.  The joints must be ``spec.ACTION_JOINT_NAMES`` in that order."""
@@ -62,7 +65,10 @@ class ReflexJointPositionAction(JointPositionAction):
 
     def process_actions(self, actions: torch.Tensor):
         super().process_actions(actions)  # raw * scale (no default offset), clipped if configured
-        self._processed_actions = self._processed_actions + sf.reflex_targets(self._asset.data.projected_gravity_b)
+        gravity = self._asset.data.projected_gravity_b
+        policy = self._processed_actions + sf.reflex_targets(gravity)
+        triggered = update_trigger(self._env, gravity)
+        self._processed_actions = torch.where(triggered.unsqueeze(-1), policy, self._env.safefall_hold)
 
 
 @configclass

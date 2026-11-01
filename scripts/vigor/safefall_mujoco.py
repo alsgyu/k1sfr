@@ -123,6 +123,8 @@ class SafeFallEnv:
         self.hist = np.zeros((n, HISTORY, 70))
         self.direction = np.zeros(n, dtype=int)
         self.facing = np.zeros(n)
+        self.triggered = np.ones(n, dtype=bool)  # the fall detector has handed over (set per episode at reset)
+        self.hold = np.tile(self.default, (n, 1))  # start pose, held until the trigger
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
         self.passive = False
@@ -159,6 +161,7 @@ class SafeFallEnv:
             q[self.head_ids] = self.default[self.head_ids]
             for leg, sgn in (("Left", 1), ("Right", -1)):  # mid-stride leg spread
                 q[spec.ALL_JOINT_NAMES.index(f"{leg}_Hip_Pitch")] += sgn * self.rng.uniform(-0.25, 0.25)
+            q += st["joint_offset"][k].numpy()  # lifted leg of walking starts
             if st["plank"][k] >= 0:  # held in a hand-off plank (head stays at its default)
                 body = len(self.head_ids)
                 plank = np.array(sf.PLANK_POSES[("front", "back")[int(st["plank"][k])]])
@@ -179,6 +182,8 @@ class SafeFallEnv:
             self.delay[i] = self.rng.integers(0, DECIMATION)
             self.direction[i] = int(st["direction"][k])
             self.facing[i] = float(st["facing"][k])
+            self.triggered[i] = bool(st["plank"][k] >= 0)
+            self.hold[i] = q
             self.prev_qvel[i] = d.qvel[self.vadr]
             self.prev_z[i] = d.xpos[self.head_body, 2], d.xpos[self.trunk_body, 2]
         self.last_action[ids] = 0.0
@@ -215,7 +220,7 @@ class SafeFallEnv:
         heights = np.stack([[d.xpos[self.trunk_body, 2], d.xpos[self.head_body, 2], d.xpos[self.hand_bodies, 2].min()]
                             for d in self.datas])
         forces = np.clip(np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT, 0.0, CONTACT_CLIP)
-        critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None]], 1)
+        critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None], self.triggered[:, None]], 1)
         return (torch.as_tensor(self.hist.reshape(self.num_envs, -1), dtype=torch.float32),
                 torch.as_tensor(critic, dtype=torch.float32))
 
@@ -228,8 +233,12 @@ class SafeFallEnv:
         if self.passive:
             a[:] = 0.0
         self.prev_targets[:] = self.targets
-        reflex = sf.reflex_targets(tm.projected_gravity(torch.as_tensor(np.stack([d.qpos[3:7] for d in self.datas]), dtype=torch.float32)))
-        self.targets[:, self.act] = reflex.numpy() + self.scale * a  # offsets from the hand-off plank (as Isaac)
+        g = tm.projected_gravity(torch.as_tensor(np.stack([d.qpos[3:7] for d in self.datas]), dtype=torch.float32))
+        new = ~self.triggered & (-g[:, 2].numpy() < sf.TRIGGER_COS)  # the fall detector (as Isaac)
+        self.facing[new] = sf.facing_from_gravity(g).numpy()[new]
+        self.triggered |= new
+        policy = sf.reflex_targets(g).numpy() + self.scale * a  # offsets from the hand-off plank
+        self.targets[:, self.act] = np.where(self.triggered[:, None], policy, self.hold[:, self.act])
         list(self.pool.map(self._substeps, self.chunks))
         self.episode_length_buf += 1
 
@@ -257,6 +266,8 @@ class SafeFallEnv:
         for k, v in reg.items():
             parts[k] = T(REG[k] * dt * v)
             rew = rew + parts[k]
+        on = T(self.triggered)  # nothing is rewarded before the fall detector hands over
+        rew, parts = rew * on, {k: v * on for k, v in parts.items()}
         self.last_action, self.prev_qvel, self.prev_z = a, qd.copy(), np.stack([head_z, trunk_z], 1)
 
         self.tracker.update(state)
@@ -298,7 +309,7 @@ _J, _A = list(spec.ALL_JOINT_NAMES), list(spec.ACTION_JOINT_NAMES)
 FRAME_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A)])
 CRITIC_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A),
                        ("polar", 3, None), ("none", 3, None), ("contacts", len(sf.CONTACT_GROUPS), None), ("none", 1, None),
-                       ("none", 1, None)])
+                       ("none", 1, None), ("none", 1, None)])
 
 
 def data_augmentation_func(obs=None, actions=None, env=None, obs_type="policy"):

@@ -110,6 +110,7 @@ class ObservationsCfg:
         heights = ObsTerm(func=mdp.body_heights)
         contact_forces = ObsTerm(func=mdp.contact_force_groups, clip=(0.0, CONTACT_CLIP))
         facing = ObsTerm(func=mdp.fall_facing)
+        triggered = ObsTerm(func=mdp.fall_triggered)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -136,6 +137,18 @@ class EventCfg:
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={"asset_cfg": SceneEntityCfg("robot", body_names="Trunk"), "mass_distribution_params": (0.9, 1.1), "operation": "scale"},
+    )
+    link_masses = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="(?!Trunk$).*"), "mass_distribution_params": (0.9, 1.1),
+                "operation": "scale"},
+    )
+    trunk_com = EventTerm(
+        func=mdp.randomize_trunk_com,
+        mode="startup",
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
+                "com_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02), "z": (-0.02, 0.02)}},
     )
     actuator_gains = EventTerm(
         func=mdp.randomize_actuator_gains,
