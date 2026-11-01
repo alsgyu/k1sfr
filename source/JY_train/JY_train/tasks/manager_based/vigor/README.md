@@ -61,10 +61,14 @@ include the plank starts. The actor sees only IMU + joints + last action (3-step
 without distillation; the critic also gets velocities, heights, contact forces, the fall direction and
 whether the trigger has fired.
 
-Domain randomisation: friction 0.4-1.2 and restitution 0-0.2, every link mass +-10 %, trunk CoM +-2 cm,
-PD gains +-10 % per episode, command delay 0-36 ms (actuator model), start joints +-0.1 rad and stride,
-IMU / encoder noise on the actor's observations. The MuJoCo check shares one model across envs and
-randomises only the delay and the start pose.
+Domain randomisation, matched to the team's walking task (`scratch_symmetry` walk_001): static / dynamic
+friction 0-2 / 0.1-2, restitution 0.1-0.9, trunk mass x0.8-1.2 and CoM +-5 cm, leg encoder offsets
++-0.03 rad (joints settle at target - offset and read position + offset), start joints +-0.05 rad and
++-0.1 rad/s, PD gains +-10 %, a +-0.5 m/s kick every 4 s (lands while the plank is held), uniform noise
+on the actor's observations (angular velocity 0.2, gravity 0.05, joint position 0.01, joint velocity 0.5);
+on top of that every other link mass +-10 % and the actuator model's command delay 0-36 ms. The MuJoCo
+check shares one model across envs: it randomises the encoder offsets, noise, kick, delay and start pose,
+not friction or masses.
 
 On the robot: run the walking policy; once the IMU tilt reaches 20 deg switch to this policy for good
 (until the get-up). Its observation history should be warm at the switch, as in training where the policy
@@ -72,8 +76,11 @@ already runs (ignored) before the trigger: run it in shadow mode while walking, 
 the current frame and a zero last action.
 
 Actions are offsets from a reflex target, not from the walking stance (`ReflexJointPositionAction`,
-`safefall_math.reflex_targets`): the hand-off plank on the side the chest faces, blended over
-|chest_z| < ~0.07 (chest_z = -projected_gravity_x). Zero action therefore reaches for the ground and
+`safefall_math.reflex_targets`): the hand-off plank of a latched side, set from the tilt direction at the
+trigger and switched only once the chest clearly faces the other way (|chest_z| > 0.3, `update_side`).
+Choosing by the sign of chest_z every step flipped the legs between straight and squatting whenever a
+side fall rolled through chest-sideways, and the policy flailed them; `residual` (-0.03 x sum of squared
+actions) keeps the policy on the reflex unless the landing needs otherwise. Zero action therefore reaches for the ground and
 ends in the plank; the policy learns the landing and balance on top. Measured from the stance, holding
 the plank took actions of -3.4 on shoulder or hip pitch, and the policy left it within 0.5 s even when
 the episode started in it. On the robot the same reflex function of the IMU's projected gravity must be

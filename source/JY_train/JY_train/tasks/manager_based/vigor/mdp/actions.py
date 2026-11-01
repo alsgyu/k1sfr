@@ -54,7 +54,7 @@ class HoldJointPositionActionCfg(ActionTermCfg):
 
 
 class ReflexJointPositionAction(JointPositionAction):
-    """Joint position targets = ``safefall_math.reflex_targets(projected gravity)`` + scale * action,
+    """Joint position targets = ``safefall_math.reflex_targets(latched side)`` + scale * action,
     from the step the fall detector triggers (``update_trigger``); before that the start pose is held
     and the actions are ignored (on the robot the walking policy runs until then).
 
@@ -65,10 +65,11 @@ class ReflexJointPositionAction(JointPositionAction):
 
     def process_actions(self, actions: torch.Tensor):
         super().process_actions(actions)  # raw * scale (no default offset), clipped if configured
-        gravity = self._asset.data.projected_gravity_b
-        policy = self._processed_actions + sf.reflex_targets(gravity)
-        triggered = update_trigger(self._env, gravity)
-        self._processed_actions = torch.where(triggered.unsqueeze(-1), policy, self._env.safefall_hold)
+        env = self._env
+        triggered = update_trigger(env, self._asset.data.projected_gravity_b)
+        # policy targets are in encoder coordinates: the joints settle at target - calibration offset
+        policy = self._processed_actions + sf.reflex_targets(env.safefall_side) - env.safefall_joint_bias[:, 2:]
+        self._processed_actions = torch.where(triggered.unsqueeze(-1), policy, env.safefall_hold)
 
 
 @configclass

@@ -66,23 +66,30 @@ PLANK_POSES = {
 # root height [m] and trunk pitch [rad] of those poses resting on fists and feet (plank_pose.py check;
 # heights from geom bounding boxes, up to ~1 cm high)
 PLANK_ROOTS = {"front": (0.327, 1.154), "back": (0.227, -0.385)}
-# chest_z over which the reflex target blends from the front plank to the back one (the back plank
-# itself has chest_z 0.38, so it gets < 1 % of the front pose)
-REFLEX_BLEND = 0.07
+# The reflex picks the front or back plank by a latched side (+1 front, -1 back): set from the tilt
+# direction at the trigger, switched only once the chest clearly faces the other way.  Picking by the
+# sign of chest_z each step flipped the legs between straight (front) and squatting (back) whenever a
+# side fall rolled through chest-sideways, and the policy flailed its legs.
+SIDE_SWITCH = 0.3  # |chest_z| beyond which the latched side follows the chest (the back plank has 0.38)
 
 
-def reflex_targets(gravity_b: torch.Tensor) -> torch.Tensor:
+def update_side(side: torch.Tensor, gravity_b: torch.Tensor) -> torch.Tensor:
+    """Latched reflex side after this step's gravity (chest_z = -gravity_x)."""
+    chest = -gravity_b[:, 0]
+    return torch.where(chest < -SIDE_SWITCH, 1.0, torch.where(chest > SIDE_SWITCH, -1.0, side))
+
+
+def reflex_targets(side: torch.Tensor) -> torch.Tensor:
     """Joint targets the policy's actions are offsets from, (N, 20) in spec.ACTION_JOINT_NAMES order.
 
-    The hand-off plank on the side the chest faces, blended through chest-sideways: with zero action
-    the robot already reaches for the ground and ends in a plank it holds, and the policy only learns
-    the landing and balance on top.  Measured from the walking stance instead, holding a plank took
-    actions of -3.4 on shoulder or hip pitch and the policy never kept it.  On the robot this is the
-    same function of the IMU's projected gravity (``gravity_b``, (N, 3))."""
+    The hand-off plank of the latched side (``update_side``): with zero action the robot reaches for the
+    ground and ends in a plank it holds, and the policy only learns the landing and balance on top.
+    Measured from the walking stance instead, holding a plank took actions of -3.4 on shoulder or hip
+    pitch and the policy never kept it.  On the robot this is the same latch on the IMU's projected
+    gravity."""
     body = len(spec.HEAD_JOINT_NAMES)
-    poses = torch.tensor([PLANK_POSES["front"][body:], PLANK_POSES["back"][body:]], device=gravity_b.device)
-    front = torch.sigmoid(gravity_b[:, :1] / REFLEX_BLEND)  # chest down: chest_z = -gravity_x < 0
-    return front * poses[0] + (1.0 - front) * poses[1]
+    poses = torch.tensor([PLANK_POSES["front"][body:], PLANK_POSES["back"][body:]], device=side.device)
+    return poses[(side < 0).long()]
 
 # per-second weights (the env multiplies by its step dt, as Isaac's RewardManager does).
 # Impacts last only a few 20 ms steps while the plank pays for seconds, so the contact weights
@@ -107,6 +114,9 @@ WEIGHTS = {
     # also voids plank and fist_share and costs more than they pay
     "facing": -5.0,
 }
+# regularisation of the residual on the reflex (per second, per sum of squared actions): leave the
+# reflex only where the landing needs it, no flailing
+RESIDUAL_WEIGHT = -0.03
 
 
 @dataclass

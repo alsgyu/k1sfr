@@ -24,7 +24,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 import JY_train.tasks.manager_based.vigor.mdp as mdp
 from JY_train.assets.robots.booster_k1_full import BOOSTER_K1_FULL_CFG, K1_FULL_ACTION_SCALE
@@ -87,12 +87,13 @@ class ObservationsCfg:
         """Deployable: IMU + joint encoders + last action, last HISTORY steps.  Fixed scales (no empirical
         normalisation) so that left-right mirroring commutes with them (safefall_symmetry)."""
 
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(std=0.1), clip=ANG_VEL_CLIP, scale=ANG_VEL_SCALE,
-                               history_length=HISTORY)
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Gnoise(std=0.02), history_length=HISTORY)
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Gnoise(std=0.01), history_length=HISTORY)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(std=0.1), clip=JOINT_VEL_CLIP, scale=JOINT_VEL_SCALE,
-                            history_length=HISTORY)
+        # noise as the team's walking task (scratch_symmetry walk_001); joint positions with encoder offsets
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2), clip=ANG_VEL_CLIP,
+                               scale=ANG_VEL_SCALE, history_length=HISTORY)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05), history_length=HISTORY)
+        joint_pos = ObsTerm(func=mdp.joint_pos_measured, noise=Unoise(n_min=-0.01, n_max=0.01), history_length=HISTORY)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5), clip=JOINT_VEL_CLIP,
+                            scale=JOINT_VEL_SCALE, history_length=HISTORY)
         last_action = ObsTerm(func=mdp.last_action, history_length=HISTORY)
 
         def __post_init__(self):
@@ -127,16 +128,16 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.4, 1.2),
-            "dynamic_friction_range": (0.4, 1.2),
-            "restitution_range": (0.0, 0.2),
+            "static_friction_range": (0.0, 2.0),  # ranges as the team's walking task
+            "dynamic_friction_range": (0.1, 2.0),
+            "restitution_range": (0.1, 0.9),
             "num_buckets": 64,
         },
     )
     trunk_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
-        params={"asset_cfg": SceneEntityCfg("robot", body_names="Trunk"), "mass_distribution_params": (0.9, 1.1), "operation": "scale"},
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="Trunk"), "mass_distribution_params": (0.8, 1.2), "operation": "scale"},
     )
     link_masses = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -148,7 +149,15 @@ class EventCfg:
         func=mdp.randomize_trunk_com,
         mode="startup",
         params={"asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-                "com_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02), "z": (-0.02, 0.02)}},
+                "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.05, 0.05)}},
+    )
+    joint_bias = EventTerm(func=mdp.randomize_joint_bias, mode="startup")  # leg encoder offsets +-0.03 rad
+    # kick every 4 s as the team's walking task: here it lands while the plank is held
+    kick = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(4.0, 4.0),
+        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
     )
     actuator_gains = EventTerm(
         func=mdp.randomize_actuator_gains,
@@ -196,6 +205,7 @@ class RewardsCfg:
     joint_vel = _reg("joint_vel_l2", -1.0e-4)
     joint_acc = _reg("joint_acc_l2", -2.5e-7)
     torque = _reg("joint_torques_l2", -1.0e-5)
+    residual = _reg("action_l2", sf.RESIDUAL_WEIGHT)
 
 
 @configclass
@@ -232,3 +242,4 @@ class SafeFallPlayEnvCfg(SafeFallEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 32
         self.observations.policy.enable_corruption = False
+        self.events.kick = None  # eval scores the fall itself (comparable across versions); training keeps it

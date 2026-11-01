@@ -198,12 +198,13 @@ def test_safefall_math():
     # head about to touch costs before contact
     low_head, _ = sf.reward(state(**planks, head_h=0.08), 0.02)
     assert (low_head < plank).all()
-    # zero action targets the hand-off plank on the side the chest faces
+    # zero action targets the hand-off plank of the latched side; the side follows the chest only past +-0.3
     assert spec.ACTION_JOINT_NAMES == spec.ALL_JOINT_NAMES[len(spec.HEAD_JOINT_NAMES):]
-    reflex = sf.reflex_targets(torch.tensor([[0.914, 0.0, -0.405], [-0.376, 0.0, -0.927], [0.0, 0.0, -1.0]]))  # the two planks, upright
-    assert torch.allclose(reflex[0], torch.tensor(sf.PLANK_POSES["front"][2:]), atol=1e-2)
-    assert torch.allclose(reflex[1], torch.tensor(sf.PLANK_POSES["back"][2:]), atol=1e-2)
-    assert torch.allclose(reflex[2], 0.5 * (reflex[0] + reflex[1]), atol=1e-2)
+    reflex = sf.reflex_targets(torch.tensor([1.0, -1.0]))
+    assert torch.allclose(reflex[0], torch.tensor(sf.PLANK_POSES["front"][2:])) and torch.allclose(reflex[1], torch.tensor(sf.PLANK_POSES["back"][2:]))
+    g = torch.tensor([[0.5, 0.0, -0.87], [-0.5, 0.0, -0.87], [0.1, 0.0, -0.99], [-0.1, 0.0, -0.99]])
+    assert torch.equal(sf.update_side(torch.tensor([-1.0, 1.0, -1.0, 1.0]), g), torch.tensor([1.0, -1.0, -1.0, 1.0]))
+    assert torch.equal(sf.update_side(torch.tensor([-1.0]), torch.tensor([[-0.376, 0.0, -0.927]])), torch.tensor([-1.0]))  # back plank stays back
     # the tracker hands the last-step pose to end_poses (what the get-up team receives)
     tr = sf.OutcomeTracker(n)
     tr.update(state(**planks))
