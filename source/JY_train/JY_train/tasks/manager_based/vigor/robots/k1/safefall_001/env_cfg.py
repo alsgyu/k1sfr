@@ -33,7 +33,9 @@ from JY_train.tasks.manager_based.vigor import spec
 
 EPISODE_LENGTH_S = sf.EPISODE_S
 HISTORY = 3
-ANG_VEL_SCALE, JOINT_VEL_SCALE, CONTACT_CLIP = 0.25, 0.05, 5.0  # observation scaling (as the MuJoCo check)
+# observation scaling and bounds (no empirical normalisation; as the MuJoCo check); clips are in raw units
+ANG_VEL_SCALE, JOINT_VEL_SCALE, CONTACT_CLIP = 0.25, 0.05, 5.0
+ANG_VEL_CLIP, JOINT_VEL_CLIP, LIN_VEL_CLIP = (-40.0, 40.0), (-40.0, 40.0), (-15.0, 15.0)
 ACTION_SCALE = {k: v for k, v in K1_FULL_ACTION_SCALE.items() if k not in spec.HEAD_JOINT_NAMES}
 # the walking stance has elbow yaw 0, on the hard limit and outside the 0.9 soft range
 ROBOT = BOOSTER_K1_FULL_CFG.replace(
@@ -85,10 +87,12 @@ class ObservationsCfg:
         """Deployable: IMU + joint encoders + last action, last HISTORY steps.  Fixed scales (no empirical
         normalisation) so that left-right mirroring commutes with them (safefall_symmetry)."""
 
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(std=0.1), scale=ANG_VEL_SCALE, history_length=HISTORY)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(std=0.1), clip=ANG_VEL_CLIP, scale=ANG_VEL_SCALE,
+                               history_length=HISTORY)
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Gnoise(std=0.02), history_length=HISTORY)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Gnoise(std=0.01), history_length=HISTORY)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(std=0.1), scale=JOINT_VEL_SCALE, history_length=HISTORY)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(std=0.1), clip=JOINT_VEL_CLIP, scale=JOINT_VEL_SCALE,
+                            history_length=HISTORY)
         last_action = ObsTerm(func=mdp.last_action, history_length=HISTORY)
 
         def __post_init__(self):
@@ -97,12 +101,12 @@ class ObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=ANG_VEL_SCALE)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, clip=ANG_VEL_CLIP, scale=ANG_VEL_SCALE)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=JOINT_VEL_SCALE)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, clip=JOINT_VEL_CLIP, scale=JOINT_VEL_SCALE)
         last_action = ObsTerm(func=mdp.last_action)
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=LIN_VEL_CLIP)
         heights = ObsTerm(func=mdp.body_heights)
         contact_forces = ObsTerm(func=mdp.contact_force_groups, clip=(0.0, CONTACT_CLIP))
         facing = ObsTerm(func=mdp.fall_facing)
@@ -151,6 +155,10 @@ def _sf(name: str) -> RewTerm:
     return RewTerm(func=mdp.safefall_term, weight=sf.WEIGHTS[name], params={"name": name})
 
 
+def _reg(term: str, weight: float) -> RewTerm:
+    return RewTerm(func=mdp.guarded_reward, weight=weight, params={"term": term})
+
+
 @configclass
 class RewardsCfg:
     # task (safefall_math.WEIGHTS)
@@ -169,12 +177,12 @@ class RewardsCfg:
     head_descent = _sf("head_descent")
     trunk_descent = _sf("trunk_descent")
     facing = _sf("facing")
-    # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    joint_pos_limit = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-1.0e-4)
-    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    torque = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
+    # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG), guarded against blow-ups
+    action_rate = _reg("action_rate_l2", -0.01)
+    joint_pos_limit = _reg("joint_pos_limits", -1.0)
+    joint_vel = _reg("joint_vel_l2", -1.0e-4)
+    joint_acc = _reg("joint_acc_l2", -2.5e-7)
+    torque = _reg("joint_torques_l2", -1.0e-5)
 
 
 @configclass

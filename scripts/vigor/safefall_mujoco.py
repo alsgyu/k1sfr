@@ -42,6 +42,7 @@ DT, DECIMATION = spec.SIM_DT, spec.DECIMATION
 EPISODE_S = sf.EPISODE_S
 HISTORY = 3
 ANG_VEL_SCALE, JOINT_VEL_SCALE, CONTACT_CLIP = 0.25, 0.05, 5.0  # observation scaling (as the Isaac task)
+ANG_VEL_CLIP, JOINT_VEL_CLIP, LIN_VEL_CLIP, ACTION_CLIP = 40.0, 40.0, 15.0, 10.0  # bounds in raw units (as Isaac)
 
 # BOOSTER_K1_FULL_CFG: (kp, kd, effort limit, armature) per joint pattern
 GAINS = [
@@ -206,10 +207,11 @@ class SafeFallEnv:
 
     def _observe(self):
         qpos, qvel, quat, grav = self._frame()
-        frame = np.concatenate([ANG_VEL_SCALE * qvel[:, 3:6], grav, qpos[:, self.qadr] - self.default,
-                                JOINT_VEL_SCALE * qvel[:, self.vadr], self.last_action], 1)
+        frame = np.concatenate([ANG_VEL_SCALE * np.clip(qvel[:, 3:6], -ANG_VEL_CLIP, ANG_VEL_CLIP), grav,
+                                qpos[:, self.qadr] - self.default,
+                                JOINT_VEL_SCALE * np.clip(qvel[:, self.vadr], -JOINT_VEL_CLIP, JOINT_VEL_CLIP), self.last_action], 1)
         self.hist = np.concatenate([self.hist[:, 1:], frame[:, None]], 1)
-        lin_b = tm.quat_apply_inverse(quat, torch.as_tensor(qvel[:, :3], dtype=torch.float32)).numpy()
+        lin_b = tm.quat_apply_inverse(quat, torch.as_tensor(qvel[:, :3], dtype=torch.float32)).numpy().clip(-LIN_VEL_CLIP, LIN_VEL_CLIP)
         heights = np.stack([[d.xpos[self.trunk_body, 2], d.xpos[self.head_body, 2], d.xpos[self.hand_bodies, 2].min()]
                             for d in self.datas])
         forces = np.clip(np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT, 0.0, CONTACT_CLIP)
@@ -222,7 +224,7 @@ class SafeFallEnv:
 
     # ---------------------------------------------------------------- step
     def step(self, actions: torch.Tensor):
-        a = actions.detach().cpu().numpy().astype(np.float64)
+        a = actions.detach().cpu().numpy().astype(np.float64).clip(-ACTION_CLIP, ACTION_CLIP)
         if self.passive:
             a[:] = 0.0
         self.prev_targets[:] = self.targets
@@ -316,7 +318,7 @@ def train_cfg(iters: int) -> dict:
     return {
         "num_steps_per_env": 24, "max_iterations": iters, "save_interval": 100, "empirical_normalization": False,
         "logger": "tensorboard", "experiment_name": "safefall_mj", "run_name": "",
-        "policy": {"class_name": "ActorCritic", "init_noise_std": 0.5, "actor_hidden_dims": [256, 128, 64],
+        "policy": {"class_name": "ActorCritic", "init_noise_std": 0.5, "noise_std_type": "log", "actor_hidden_dims": [256, 128, 64],
                    "critic_hidden_dims": [256, 128, 64], "activation": "elu"},
         "algorithm": {"class_name": "PPO", "value_loss_coef": 1.0, "use_clipped_value_loss": True, "clip_param": 0.2,
                       "entropy_coef": 0.005, "num_learning_epochs": 5, "num_mini_batches": 4, "learning_rate": 1.0e-3,
