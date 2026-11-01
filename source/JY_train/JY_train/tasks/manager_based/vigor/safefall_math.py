@@ -116,7 +116,7 @@ WEIGHTS = {
 }
 # regularisation of the residual on the reflex (per second, per sum of squared actions): leave the
 # reflex only where the landing needs it, no flailing
-RESIDUAL_WEIGHT = -0.03
+RESIDUAL_WEIGHT = -0.01
 
 
 @dataclass

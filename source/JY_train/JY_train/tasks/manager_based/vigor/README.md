@@ -79,7 +79,7 @@ Actions are offsets from a reflex target, not from the walking stance (`ReflexJo
 `safefall_math.reflex_targets`): the hand-off plank of a latched side, set from the tilt direction at the
 trigger and switched only once the chest clearly faces the other way (|chest_z| > 0.3, `update_side`).
 Choosing by the sign of chest_z every step flipped the legs between straight and squatting whenever a
-side fall rolled through chest-sideways, and the policy flailed them; `residual` (-0.03 x sum of squared
+side fall rolled through chest-sideways, and the policy flailed them; `residual` (-0.01 x sum of squared
 actions) keeps the policy on the reflex unless the landing needs otherwise. Zero action therefore reaches for the ground and
 ends in the plank; the policy learns the landing and balance on top. Measured from the stance, holding
 the plank took actions of -3.4 on shoulder or hip pitch, and the policy left it within 0.5 s even when
