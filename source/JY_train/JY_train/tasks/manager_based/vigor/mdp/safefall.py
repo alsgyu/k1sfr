@@ -62,10 +62,28 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
 
 
 # -------------------------------------------------------------------- rewards
+def _guarded(env: ManagerBasedRLEnv, value: torch.Tensor) -> torch.Tensor:
+    """Zero for envs that blew up this step (terminated by bad_state; rewards are computed before the
+    reset) and for any non-finite value: one NaN reward turns the whole PPO update into NaN.  The bound
+    is far above any physical value of the unweighted terms (joint_acc_l2 reaches ~1e7 at impacts)."""
+    value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1.0e9, 1.0e9)
+    if "bad_state" in env.termination_manager.active_terms:
+        value = torch.where(env.termination_manager.get_term("bad_state"), torch.zeros_like(value), value)
+    return value
+
+
 def safefall_term(env: ManagerBasedRLEnv, name: str) -> torch.Tensor:
     """One unweighted term of ``safefall_math.terms`` (weight it with ``safefall_math.WEIGHTS[name]``)."""
     fall_state(env)
-    return env._safefall_cache[2][name]
+    return _guarded(env, env._safefall_cache[2][name])
+
+
+def guarded_reward(env: ManagerBasedRLEnv, term: str) -> torch.Tensor:
+    """The ``isaaclab.envs.mdp`` reward ``term`` (by name: cfg params go through hydra as strings) with
+    blown-up envs and non-finite values zeroed."""
+    import isaaclab.envs.mdp as isaac_mdp
+
+    return _guarded(env, getattr(isaac_mdp, term)(env))
 
 
 # ---------------------------------------------------------------- observations

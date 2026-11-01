@@ -82,8 +82,10 @@ class SafeFallPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 250
     experiment_name = "k1_safefall"
     empirical_normalization = False
+    clip_actions = 10.0  # bounds the last-action observation too (no normalisation)
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.5,
+        noise_std_type="log",  # a "scalar" std can step below zero and crash the update (seen on the GPU)
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
