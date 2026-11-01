@@ -31,6 +31,7 @@ TERM_KINDS = {
     "heights": "none",
     "contact_forces": "contacts",
     "facing": "none",
+    "triggered": "none",
 }
 
 

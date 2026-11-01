@@ -67,6 +67,8 @@ def _guarded(env: ManagerBasedRLEnv, value: torch.Tensor) -> torch.Tensor:
     reset) and for any non-finite value: one NaN reward turns the whole PPO update into NaN.  The bound
     is far above any physical value of the unweighted terms (joint_acc_l2 reaches ~1e7 at impacts)."""
     value = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0).clamp(-1.0e9, 1.0e9)
+    if hasattr(env, "safefall_triggered"):  # nothing before the fall detector hands over
+        value = value * env.safefall_triggered
     if "bad_state" in env.termination_manager.active_terms:
         value = torch.where(env.termination_manager.get_term("bad_state"), torch.zeros_like(value), value)
     return value
@@ -104,6 +106,32 @@ def fall_facing(env: ManagerBasedEnv) -> torch.Tensor:
     return fall_state(env).facing.unsqueeze(-1)
 
 
+def fall_triggered(env: ManagerBasedEnv) -> torch.Tensor:
+    """Privileged: 1 once the fall detector has handed over to the policy."""
+    _start_buffers(env)
+    return env.safefall_triggered.float().unsqueeze(-1)
+
+
+# --------------------------------------------------------------------- trigger
+def _start_buffers(env: ManagerBasedEnv):
+    if not hasattr(env, "safefall_direction"):
+        n = env.num_envs
+        env.safefall_direction = torch.zeros(n, dtype=torch.long, device=env.device)
+        env.safefall_facing = torch.zeros(n, device=env.device)
+        env.safefall_triggered = torch.ones(n, dtype=torch.bool, device=env.device)  # set per episode at reset
+        env.safefall_hold = torch.zeros(n, len(spec.ACTION_JOINT_NAMES), device=env.device)
+
+
+def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tensor:
+    """The fall detector: latch per env once the tilt reaches ``TRIGGER_TILT_DEG``; the facing of the
+    fall (which side should end up down) is taken from the tilt direction at that moment."""
+    _start_buffers(env)
+    new = ~env.safefall_triggered & (-gravity_b[:, 2] < sf.TRIGGER_COS)
+    env.safefall_facing[new] = sf.facing_from_gravity(gravity_b)[new]
+    env.safefall_triggered |= new
+    return env.safefall_triggered
+
+
 # ---------------------------------------------------------------------- events
 def reset_to_fall_start(
     env: ManagerBasedEnv,
@@ -113,8 +141,8 @@ def reset_to_fall_start(
     spawn_margin: float = 0.02,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Walking stance tipping or pushed in a random direction, or held in a hand-off plank
-    (``safefall_math.sample_starts``)."""
+    """Standing or walking on the ground and pushed in a random direction, or held in a hand-off
+    plank (``safefall_math.sample_starts``).  The start pose is held until the fall detector triggers."""
     robot: Articulation = env.scene[asset_cfg.name]
     n = len(env_ids)
     st = sf.sample_starts(n, env.device)
@@ -126,6 +154,7 @@ def reset_to_fall_start(
     spread = (2.0 * torch.rand(n, device=env.device) - 1.0) * stride_spread  # mid-stride legs
     q[:, robot.find_joints("Left_Hip_Pitch")[0][0]] += spread
     q[:, robot.find_joints("Right_Hip_Pitch")[0][0]] -= spread
+    q[:, robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]] += st["joint_offset"]  # lifted leg
     planks = torch.tensor([sf.PLANK_POSES["front"], sf.PLANK_POSES["back"]], device=env.device)[st["plank"].clamp_min(0)]
     on = st["plank"] >= 0
     body = len(spec.HEAD_JOINT_NAMES)  # the head stays held at its default
@@ -135,15 +164,15 @@ def reset_to_fall_start(
     q = torch.clamp(q, limits[..., 0], limits[..., 1])
 
     pos = env.scene.env_origins[env_ids] + st["root_rel"]
-    pos[:, 2] += 0.09 * torch.sin(st["tilt"]) + spawn_margin  # toe/heel edge dips below the pivot
+    pos[:, 2] += spawn_margin  # standing: soles 0-2 cm above the ground (joint noise tilts the feet)
     robot.write_root_pose_to_sim(torch.cat((pos, st["root_quat"]), dim=-1), env_ids=env_ids)
     robot.write_root_velocity_to_sim(torch.cat((st["lin_vel"], st["ang_vel"]), dim=-1), env_ids=env_ids)
     robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
-    if not hasattr(env, "safefall_direction"):
-        env.safefall_direction = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-        env.safefall_facing = torch.zeros(env.num_envs, device=env.device)
+    _start_buffers(env)
     env.safefall_direction[env_ids] = st["direction"]
     env.safefall_facing[env_ids] = st["facing"]
+    env.safefall_triggered[env_ids] = on  # plank starts are the policy's from the first step
+    env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 
 
 # --------------------------------------------------------------------- monitor

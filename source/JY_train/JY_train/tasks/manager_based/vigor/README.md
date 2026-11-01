@@ -23,7 +23,7 @@ clips (catch the fall on both hands, stand up from there without lying down).
 
 Stand-up is handled elsewhere; this task only asks the K1 to fall safely on flat ground: land
 on the fists, let nothing else touch (the head least of all), and hold a fist plank (fists +
-feet, stiff arms) until the end of the 4 s episode, on the side it fell to, in a fixed pose the
+feet, stiff arms) until the end of the 5 s episode, on the side it fell to, in a fixed pose the
 get-up starts from: the front plank (chest down, push-up position) or the back plank (chest up,
 crab on fists and flat feet). If the get-up is not ready, lowering down is the robot's damping
 mode (kp = 0), checked with `--release_after`. No demonstrations: v1-v3 tracked references the K1 could not
@@ -47,11 +47,29 @@ follow inside a fall ("arms up, face first"). The reward is written on the fall 
 plus action-rate / joint-limit / joint-velocity / acceleration / torque regularisation. Impacts
 last a few 20 ms steps while the plank pays for seconds, hence the large contact weights (one head
 hit costs more than a whole episode of plank). Contact forces are the peak over the 10 physics
-substeps of a policy step. Episodes start from the walking stance tipping 10-30 deg (0.5-2.5 rad/s) or pushed (0.8-2.0 m/s), 45 % forward, 20 %
-backward, 35 % sideways; 20 % of the episodes instead start held in a hand-off plank (direction `plank`) so the
-policy learns to hold the target poses, which falls alone rarely reached. Eval scripts measure falls only
-(`PLANK_START_PROB = 0`); training `Metrics/monitor/*` include the plank starts. The actor sees only IMU + joints + last action (3-step history), so it
-deploys without distillation; the critic also gets velocities, heights, contact forces and the fall direction.
+substeps of a policy step.
+
+Episodes follow the robot's fall handling: the K1 stands on the ground (half of the episodes walking:
+0.2-0.6 m/s forward with one leg lifted mid-swing) and is pushed (0.6-1.8 m/s on the trunk; 45 %
+forward, 20 % backward, 35 % sideways, +-45 deg). Until the IMU tilt reaches 20 deg (the fall detector,
+`TRIGGER_TILT_DEG`) the start pose is held and the policy's actions are ignored and unrewarded - on the
+robot the walking policy runs until then; from the trigger on the policy acts (MuJoCo: every push
+triggers, after 0.2-0.5 s). The facing of the fall is taken from the tilt direction at the trigger. 20 %
+of the episodes instead start held in a hand-off plank (direction `plank`) so the policy learns to hold
+the target poses. Eval scripts measure falls only (`PLANK_START_PROB = 0`); training `Metrics/monitor/*`
+include the plank starts. The actor sees only IMU + joints + last action (3-step history), so it deploys
+without distillation; the critic also gets velocities, heights, contact forces, the fall direction and
+whether the trigger has fired.
+
+Domain randomisation: friction 0.4-1.2 and restitution 0-0.2, every link mass +-10 %, trunk CoM +-2 cm,
+PD gains +-10 % per episode, command delay 0-36 ms (actuator model), start joints +-0.1 rad and stride,
+IMU / encoder noise on the actor's observations. The MuJoCo check shares one model across envs and
+randomises only the delay and the start pose.
+
+On the robot: run the walking policy; once the IMU tilt reaches 20 deg switch to this policy for good
+(until the get-up). Its observation history should be warm at the switch, as in training where the policy
+already runs (ignored) before the trigger: run it in shadow mode while walking, or fill the history with
+the current frame and a zero last action.
 
 Actions are offsets from a reflex target, not from the walking stance (`ReflexJointPositionAction`,
 `safefall_math.reflex_targets`): the hand-off plank on the side the chest faces, blended over
