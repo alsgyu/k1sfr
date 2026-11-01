@@ -350,6 +350,16 @@ def summarize(episodes: list[dict]) -> dict:
     return out
 
 
+SCORE_KEYS = ("head_hit", "plank_end", "trunk_hit", "knee_hit", "pose_rms", "fists_first")
+
+
+def score(summary: dict) -> float:
+    """One number to rank checkpoints (higher is better): the head first, then ending clean in the
+    hand-off plank, then trunk / knee contact and the distance to the hand-off pose."""
+    s = summary
+    return s["plank_end"] - 3.0 * s["head_hit"] - s["trunk_hit"] - s["knee_hit"] - s["pose_rms"]
+
+
 def end_poses(episodes: list[dict]) -> dict:
     """Last-step poses of the episodes that ended in a clean two-fist plank, per side (chest down =
     front), next to the target hand-off pose: what the get-up actually receives."""
