@@ -84,9 +84,10 @@ def sweep(env, runner, run_dir: str, every: int, out_dir: str):
         runner.load(path, load_optimizer=False)
         policy = runner.get_inference_policy(device=base.device)
         torch.manual_seed(args_cli.seed)
-        obs, _ = env.reset()  # every env restarts together: identical starts for every checkpoint
-        monitor.finished.clear()
+        # inside inference mode like the steps: buffers written there cannot be updated outside it
         with torch.inference_mode():
+            obs, _ = env.reset()  # every env restarts together: identical starts for every checkpoint
+            monitor.finished.clear()
             while simulation_app.is_running() and len(monitor.finished) < args_cli.episodes:
                 obs, _, _, _ = env.step(policy(obs))
         s = sf.summarize(monitor.finished[: args_cli.episodes])
