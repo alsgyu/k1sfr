@@ -8,6 +8,8 @@
     python scripts/vigor/eval_safefall.py --passive --headless
     # after holding the plank, switch to the robot's damping mode (kp = 0) and watch it lower down
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --release_after 2.5
+    # which checkpoint is best: every 500th of the run on the same falls, ranked by safefall_math.score
+    python scripts/vigor/eval_safefall.py --run flat --sweep 500 --num_envs 256 --headless
 
 Writes logs/vigor/eval/<timestamp>_safefall/summary.json, end_poses.json (the planks the falls ended
 in, per side, next to the target hand-off poses: for the get-up team) and videos/ with --video.
@@ -34,6 +36,8 @@ parser.add_argument("--video", action="store_true", default=False)
 parser.add_argument("--video_length", type=int, default=750)
 parser.add_argument("--release_after", type=float, default=None, help="damping mode (kp = 0) after this many seconds")
 parser.add_argument("--release_damping", type=float, default=None, help="joint damping in damping mode (default: keep)")
+parser.add_argument("--sweep", type=int, default=None, help="rank every N-th checkpoint of the run on the same falls")
+parser.add_argument("--seed", type=int, default=0, help="start states of the falls (same for every checkpoint)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 if args_cli.video:
@@ -44,9 +48,11 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import glob
 import gymnasium as gym
 import json
 import os
+import re
 import time
 import torch
 from datetime import datetime
@@ -63,6 +69,37 @@ from JY_train.tasks.manager_based.vigor import spec
 from JY_train.tasks.manager_based.vigor.mdp.safefall import fall_state
 
 from common import resolve_checkpoint
+
+
+def sweep(env, runner, run_dir: str, every: int, out_dir: str):
+    """Every ``every``-th checkpoint (and the last) on the same falls; ranked by ``safefall_math.score``."""
+    base = env.unwrapped
+    monitor = base.command_manager.get_term("monitor")
+    monitor.collect = True
+    it = lambda f: int(re.findall(r"model_(\d+)\.pt", f)[0])  # noqa: E731
+    files = sorted(glob.glob(os.path.join(run_dir, "model_*.pt")), key=it)
+    picked = [f for f in files if it(f) > 0 and it(f) % every == 0] + ([files[-1]] if it(files[-1]) % every else [])
+    rows = []
+    for path in picked:
+        runner.load(path, load_optimizer=False)
+        policy = runner.get_inference_policy(device=base.device)
+        torch.manual_seed(args_cli.seed)
+        obs, _ = env.reset()  # every env restarts together: identical starts for every checkpoint
+        monitor.finished.clear()
+        with torch.inference_mode():
+            while simulation_app.is_running() and len(monitor.finished) < args_cli.episodes:
+                obs, _, _, _ = env.step(policy(obs))
+        s = sf.summarize(monitor.finished[: args_cli.episodes])
+        rows.append({"checkpoint": os.path.basename(path), "score": sf.score(s)} | {k: s[k] for k in sf.SCORE_KEYS} | {"summary": s})
+        print(f"[SafeFall] {rows[-1]['checkpoint']}: score {rows[-1]['score']:+.3f}", flush=True)
+    rows.sort(key=lambda r: -r["score"])
+    print(f"\n{'checkpoint':>16} {'score':>7} " + " ".join(f"{k:>10}" for k in sf.SCORE_KEYS))
+    for r in rows:
+        print(f"{r['checkpoint']:>16} {r['score']:+7.3f} " + " ".join(f"{r[k]:10.3f}" for k in sf.SCORE_KEYS))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "sweep.json"), "w") as f:
+        json.dump({"run": run_dir, "seed": args_cli.seed, "episodes": args_cli.episodes, "ranked": rows}, f, indent=1)
+    print(f"[SafeFall] best {rows[0]['checkpoint']}; wrote {out_dir}/sweep.json")
 
 
 def main():
@@ -91,6 +128,10 @@ def main():
     else:
         path = resolve_checkpoint(os.path.abspath(os.path.join("logs", "rsl_rl", agent.experiment_name)), args_cli.run, args_cli.checkpoint)
         runner = OnPolicyRunner(env, agent.to_dict(), log_dir=None, device=device)
+        if args_cli.sweep:
+            sweep(env, runner, os.path.dirname(path), args_cli.sweep, out_dir)
+            env.close()
+            return
         runner.load(path, load_optimizer=False)
         policy = runner.get_inference_policy(device=device)
     print(f"[SafeFall] evaluating {path}")
