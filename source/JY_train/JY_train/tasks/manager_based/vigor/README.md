@@ -59,8 +59,16 @@ Actions are offsets from a reflex target, not from the walking stance (`ReflexJo
 ends in the plank; the policy learns the landing and balance on top. Measured from the stance, holding
 the plank took actions of -3.4 on shoulder or hip pitch, and the policy left it within 0.5 s even when
 the episode started in it. On the robot the same reflex function of the IMU's projected gravity must be
-added to the policy output (`--passive` in the eval scripts is the reflex alone: fists first 97 %, but
+added to the policy output, and the observations scaled as in training (angular velocity x 0.25,
+joint velocity x 0.05) (`--passive` in the eval scripts is the reflex alone: fists first 97 %, but
 the head hits 76 % because nothing absorbs the impact).
+
+Left-right symmetry augmentation (`safefall_symmetry.py`, rsl_rl `symmetry_cfg`): PPO also trains on
+the mirror image of every sample, so a straight forward fall gets a symmetric landing. Without it the
+policy broke symmetry at random (run8: elbows 0.66 rad apart, right fist always further up). The
+augmentation reads the observation layout from the observation manager; a new observation term needs
+an entry in `TERM_KINDS`. rsl_rl stores normalised observations before augmenting, so the task uses
+fixed observation scales instead of empirical normalisation.
 
 ```bash
 # laptop, MuJoCo (same URDF, gains, starts and reward), ~15 min for 1500 iterations
@@ -78,7 +86,10 @@ Outcomes (training `Metrics/monitor/*`, eval `summary.json`): `head_hit` / `trun
 the time after touch-down spent on the fists only), `upright_end`, `flipped` (turned round by the
 end: forward fall chest up / backward fall chest down), `plank_end` (clean two-fist plank at the
 last step), `pose_rms` (RMS joint error to the hand-off pose at the last step, rad); with
-`--release_after` also `release_*` for the lowering phase.
+`--release_after` also `release_*` for the lowering phase; `asym_rms` (RMS left-right asymmetry of
+the end pose, rad). Which checkpoint is best: `eval_safefall.py --sweep 500` evaluates every 500th
+checkpoint of the run on identical falls and ranks them by `safefall_math.score`
+(plank_end - 3 head_hit - trunk_hit - knee_hit - pose_rms).
 
 Hand-off poses (`safefall_math.PLANK_POSES`): symmetric planks the K1 holds on its PD gains
 alone (arms straight under the shoulders take the load through the bones, ~1 Nm at the
@@ -88,7 +99,8 @@ picked from a grid of symmetric candidates by `scripts/vigor/plank_pose.py` (`se
 INHA-Recovery-Motion `K1_JOINT_ORDER`, root height, roll/pitch, projected gravity). The B-Human
 fast get-up keyframes are not holdable planks (keyframe 3 rests on one fist with the head 7 cm off
 the ground, keyframe 4 has the hands up). `eval_safefall.py` also writes `end_poses.json`: the
-planks the falls actually ended in, per side, with their spread (run it without `--release_after`).
+planks the falls actually ended in, per side, with their spread and every end state as `samples` for the
+get-up to start from (run it without `--release_after`).
 
 ```bash
 python scripts/vigor/plank_pose.py check --out source/JY_train/JY_train/tasks/manager_based/vigor/plank_poses.json --render plank_poses.png

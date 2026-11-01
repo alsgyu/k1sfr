@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO / "scripts/vigor/data"))
 
 import k1_getup  # noqa: E402  (walking stance)
 import safefall_math as sf  # noqa: E402
+import safefall_symmetry  # noqa: E402
 import spec  # noqa: E402
 import torch_math as tm  # noqa: E402
 
@@ -40,6 +41,7 @@ URDF = REPO / "source/JY_train/JY_train/assets/robots/urdf/K1_22dof_jy.urdf"
 DT, DECIMATION = spec.SIM_DT, spec.DECIMATION
 EPISODE_S = sf.EPISODE_S
 HISTORY = 3
+ANG_VEL_SCALE, JOINT_VEL_SCALE, CONTACT_CLIP = 0.25, 0.05, 5.0  # observation scaling (as the Isaac task)
 
 # BOOSTER_K1_FULL_CFG: (kp, kd, effort limit, armature) per joint pattern
 GAINS = [
@@ -204,12 +206,13 @@ class SafeFallEnv:
 
     def _observe(self):
         qpos, qvel, quat, grav = self._frame()
-        frame = np.concatenate([qvel[:, 3:6], grav, qpos[:, self.qadr] - self.default, qvel[:, self.vadr], self.last_action], 1)
+        frame = np.concatenate([ANG_VEL_SCALE * qvel[:, 3:6], grav, qpos[:, self.qadr] - self.default,
+                                JOINT_VEL_SCALE * qvel[:, self.vadr], self.last_action], 1)
         self.hist = np.concatenate([self.hist[:, 1:], frame[:, None]], 1)
         lin_b = tm.quat_apply_inverse(quat, torch.as_tensor(qvel[:, :3], dtype=torch.float32)).numpy()
         heights = np.stack([[d.xpos[self.trunk_body, 2], d.xpos[self.head_body, 2], d.xpos[self.hand_bodies, 2].min()]
                             for d in self.datas])
-        forces = np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT
+        forces = np.clip(np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT, 0.0, CONTACT_CLIP)
         critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None]], 1)
         return (torch.as_tensor(self.hist.reshape(self.num_envs, -1), dtype=torch.float32),
                 torch.as_tensor(critic, dtype=torch.float32))
@@ -280,15 +283,46 @@ class SafeFallEnv:
 
 
 # ----------------------------------------------------------------- PPO
+def _parts(kinds) -> list:
+    out, start = [], 0
+    for kind, width, names in kinds:
+        out.append((slice(start, start + width), kind, width, names))
+        start += width
+    return out
+
+
+# observation layout for left-right mirroring: one policy frame (the policy sees HISTORY of them), the critic
+_J, _A = list(spec.ALL_JOINT_NAMES), list(spec.ACTION_JOINT_NAMES)
+FRAME_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A)])
+CRITIC_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A),
+                       ("polar", 3, None), ("none", 3, None), ("contacts", len(sf.CONTACT_GROUPS), None), ("none", 1, None),
+                       ("none", 1, None)])
+
+
+def data_augmentation_func(obs=None, actions=None, env=None, obs_type="policy"):
+    """Symmetry augmentation for this env's layout (the Isaac task reads its layout from the env)."""
+    out_obs = out_actions = None
+    if obs is not None:
+        n = obs.shape[0]
+        mirrored = (safefall_symmetry.mirror_obs(obs.reshape(n * HISTORY, -1), FRAME_PARTS).reshape(n, -1)
+                    if obs_type == "policy" else safefall_symmetry.mirror_obs(obs, CRITIC_PARTS))
+        out_obs = torch.cat((obs, mirrored))
+    if actions is not None:
+        out_actions = torch.cat((actions, sf.mirror(actions, "joints", _A)))
+    return out_obs, out_actions
+
+
 def train_cfg(iters: int) -> dict:
     return {
-        "num_steps_per_env": 24, "max_iterations": iters, "save_interval": 100, "empirical_normalization": True,
+        "num_steps_per_env": 24, "max_iterations": iters, "save_interval": 100, "empirical_normalization": False,
         "logger": "tensorboard", "experiment_name": "safefall_mj", "run_name": "",
         "policy": {"class_name": "ActorCritic", "init_noise_std": 0.5, "actor_hidden_dims": [256, 128, 64],
                    "critic_hidden_dims": [256, 128, 64], "activation": "elu"},
         "algorithm": {"class_name": "PPO", "value_loss_coef": 1.0, "use_clipped_value_loss": True, "clip_param": 0.2,
                       "entropy_coef": 0.005, "num_learning_epochs": 5, "num_mini_batches": 4, "learning_rate": 1.0e-3,
-                      "schedule": "adaptive", "gamma": 0.99, "lam": 0.95, "desired_kl": 0.01, "max_grad_norm": 1.0},
+                      "schedule": "adaptive", "gamma": 0.99, "lam": 0.95, "desired_kl": 0.01, "max_grad_norm": 1.0,
+                      "symmetry_cfg": {"use_data_augmentation": True, "use_mirror_loss": False, "mirror_loss_coeff": 0.0,
+                                       "data_augmentation_func": data_augmentation_func}},
     }
 
 

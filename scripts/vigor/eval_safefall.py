@@ -171,7 +171,8 @@ def main():
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary | {"episodes_detail": eps}, f, indent=2)
     with open(os.path.join(out_dir, "end_poses.json"), "w") as f:
-        json.dump({"joint_names": spec.ALL_JOINT_NAMES, "checkpoint": path} | sf.end_poses(eps), f, indent=1)
+        json.dump({"joint_names": spec.ALL_JOINT_NAMES, "note": "same order as INHA-Recovery-Motion K1_JOINT_ORDER",
+                   "checkpoint": path} | sf.end_poses(eps), f, indent=1)
     print(json.dumps(summary, indent=2))
     print(f"[SafeFall] wrote {out_dir}")
     env.close()

@@ -33,6 +33,7 @@ from JY_train.tasks.manager_based.vigor import spec
 
 EPISODE_LENGTH_S = sf.EPISODE_S
 HISTORY = 3
+ANG_VEL_SCALE, JOINT_VEL_SCALE, CONTACT_CLIP = 0.25, 0.05, 5.0  # observation scaling (as the MuJoCo check)
 ACTION_SCALE = {k: v for k, v in K1_FULL_ACTION_SCALE.items() if k not in spec.HEAD_JOINT_NAMES}
 # the walking stance has elbow yaw 0, on the hard limit and outside the 0.9 soft range
 ROBOT = BOOSTER_K1_FULL_CFG.replace(
@@ -81,12 +82,13 @@ class ActionsCfg:
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        """Deployable: IMU + joint encoders + last action, last HISTORY steps."""
+        """Deployable: IMU + joint encoders + last action, last HISTORY steps.  Fixed scales (no empirical
+        normalisation) so that left-right mirroring commutes with them (safefall_symmetry)."""
 
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(std=0.1), history_length=HISTORY)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(std=0.1), scale=ANG_VEL_SCALE, history_length=HISTORY)
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Gnoise(std=0.02), history_length=HISTORY)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Gnoise(std=0.01), history_length=HISTORY)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(std=0.1), history_length=HISTORY)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(std=0.1), scale=JOINT_VEL_SCALE, history_length=HISTORY)
         last_action = ObsTerm(func=mdp.last_action, history_length=HISTORY)
 
         def __post_init__(self):
@@ -95,14 +97,14 @@ class ObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=ANG_VEL_SCALE)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=JOINT_VEL_SCALE)
         last_action = ObsTerm(func=mdp.last_action)
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         heights = ObsTerm(func=mdp.body_heights)
-        contact_forces = ObsTerm(func=mdp.contact_force_groups)
+        contact_forces = ObsTerm(func=mdp.contact_force_groups, clip=(0.0, CONTACT_CLIP))
         facing = ObsTerm(func=mdp.fall_facing)
 
         def __post_init__(self):

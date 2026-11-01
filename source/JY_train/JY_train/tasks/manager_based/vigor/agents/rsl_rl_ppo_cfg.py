@@ -1,7 +1,8 @@
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
 
 from JY_train.tasks.manager_based.vigor import spec
+from JY_train.tasks.manager_based.vigor.safefall_symmetry import data_augmentation_func
 
 
 @configclass
@@ -72,13 +73,15 @@ class VigorDistillCfg:
 
 @configclass
 class SafeFallPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Plain MLP actor-critic (deployable proprio history; privileged critic), as in the MuJoCo check."""
+    """Plain MLP actor-critic (deployable proprio history; privileged critic), as in the MuJoCo check, with
+    left-right symmetry augmentation (fixed observation scales instead of empirical normalisation, see
+    safefall_symmetry)."""
 
     num_steps_per_env = 24
     max_iterations = 3000
     save_interval = 250
     experiment_name = "k1_safefall"
-    empirical_normalization = True
+    empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.5,
         actor_hidden_dims=[256, 128, 64],
@@ -98,4 +101,7 @@ class SafeFallPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        symmetry_cfg=RslRlSymmetryCfg(
+            use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=data_augmentation_func
+        ),
     )

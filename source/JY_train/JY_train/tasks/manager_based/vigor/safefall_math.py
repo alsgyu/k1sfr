@@ -149,6 +149,43 @@ def plank(s: FallState) -> torch.Tensor:
     return clean * (0.5 * _on(f["fist_l"]).float() + 0.5 * _on(f["fist_r"]).float())
 
 
+# ------------------------------------------------------------------ mirroring
+# Left-right reflection through the sagittal plane (symmetry augmentation, asymmetry outcome).  On this
+# URDF pitch joints keep their sign and roll / yaw joints flip (checked by forward kinematics); body-frame
+# angular velocity flips x and z, vectors (gravity, linear velocity) flip y.
+MIRROR_KINDS = ("axial", "polar", "joints", "contacts", "none")
+
+
+def _joint_mirror(names: tuple[str, ...] | list[str]) -> tuple[list[int], list[float]]:
+    swap = lambda n: n.replace("Left", "@").replace("Right", "Left").replace("@", "Right")  # noqa: E731
+    return [list(names).index(swap(n)) for n in names], [1.0 if "pitch" in n.lower() else -1.0 for n in names]
+
+
+def mirror(x: torch.Tensor, kind: str, names=None) -> torch.Tensor:
+    """Mirror the last dimension of ``x``: an angular velocity ("axial"), a vector ("polar"), joint values
+    in the order of ``names`` ("joints"), CONTACT_GROUPS forces ("contacts") or a symmetric quantity."""
+    if kind == "axial":
+        return x * torch.tensor([-1.0, 1.0, -1.0], device=x.device)
+    if kind == "polar":
+        return x * torch.tensor([1.0, -1.0, 1.0], device=x.device)
+    if kind == "joints":
+        perm, sign = _joint_mirror(names)
+        return x[..., perm] * torch.tensor(sign, device=x.device)
+    if kind == "contacts":
+        groups = list(CONTACT_GROUPS)
+        perm = [groups.index({"fist_l": "fist_r", "fist_r": "fist_l"}.get(g, g)) for g in groups]
+        return x[..., perm]
+    if kind == "none":
+        return x
+    raise ValueError(f"unknown mirror kind {kind!r}")
+
+
+def asymmetry(q: torch.Tensor) -> torch.Tensor:
+    """RMS left-right asymmetry of (N, 22) joint positions over the body joints [rad] (0 = symmetric pose)."""
+    head = len(spec.HEAD_JOINT_NAMES)
+    return (0.5 * (q - mirror(q, "joints", spec.ALL_JOINT_NAMES)))[:, head:].square().mean(dim=-1).sqrt()
+
+
 def plank_target(s: FallState) -> torch.Tensor:
     """(N, 22) hand-off pose for each env: the front plank with the chest down, the back one up."""
     poses = torch.tensor([PLANK_POSES["front"], PLANK_POSES["back"]], device=s.q.device)
@@ -262,11 +299,12 @@ class OutcomeTracker:
     flipped     : turned round by the last step (forward fall chest up / backward fall chest down)
     plank_end   : on both fists, nothing else touching, at the last step
     pose_rms    : RMS joint error to the hand-off pose at the last step [rad]
+    asym_rms    : RMS left-right asymmetry of the pose at the last step [rad]
     Episode dicts also carry ``end`` (joint positions, trunk height, projected gravity at the last step).
     """
 
     KEYS = ("head_hit", "trunk_hit", "knee_hit", "head_peak", "trunk_peak", "leg_peak", "fist_share", "fists_first",
-            "plank", "upright_end", "flipped", "plank_end", "pose_rms")
+            "plank", "upright_end", "flipped", "plank_end", "pose_rms", "asym_rms")
 
     def __init__(self, num_envs: int, device="cpu"):
         z = lambda: torch.zeros(num_envs, device=device)  # noqa: E731
@@ -299,6 +337,7 @@ class OutcomeTracker:
             "flipped": (s.facing * s.chest_z > 0.25).float(),
             "plank_end": (plank(s) == 1.0).float(),
             "pose_rms": pose_error(s).sqrt(),
+            "asym_rms": asymmetry(s.q),
         }
         for k, x in new.items():  # in place: SafeFallMonitor logs these very tensors
             v[k].copy_(torch.where(live, x, v[k]))
@@ -350,7 +389,7 @@ def summarize(episodes: list[dict]) -> dict:
     return out
 
 
-SCORE_KEYS = ("head_hit", "plank_end", "trunk_hit", "knee_hit", "pose_rms", "fists_first")
+SCORE_KEYS = ("head_hit", "plank_end", "trunk_hit", "knee_hit", "pose_rms", "asym_rms", "fists_first")
 
 
 def score(summary: dict) -> float:
@@ -362,7 +401,8 @@ def score(summary: dict) -> float:
 
 def end_poses(episodes: list[dict]) -> dict:
     """Last-step poses of the episodes that ended in a clean two-fist plank, per side (chest down =
-    front), next to the target hand-off pose: what the get-up actually receives."""
+    front), next to the target hand-off pose: what the get-up actually receives.  ``samples`` keeps every
+    such end state (joints, trunk height, projected gravity) for the get-up to start from."""
     out = {}
     for side, sign in (("front", 1.0), ("back", -1.0)):
         ends = [e["end"] for e in episodes if e["plank_end"] == 1.0 and sign * e["end"]["gravity_b"][0] > 0.0]
@@ -376,5 +416,6 @@ def end_poses(episodes: list[dict]) -> dict:
                 "joint_pos_std": r(q.std(dim=0)) if len(ends) > 1 else None,
                 "trunk_h_median": round(float(torch.tensor([x["trunk_h"] for x in ends]).median()), 3),
                 "projected_gravity_median": r(torch.tensor([x["gravity_b"] for x in ends]).median(dim=0).values),
+                "samples": ends,
             }
     return out
