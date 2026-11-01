@@ -120,23 +120,54 @@ def _start_buffers(env: ManagerBasedEnv):
         env.safefall_facing = torch.zeros(n, device=env.device)
         env.safefall_triggered = torch.ones(n, dtype=torch.bool, device=env.device)  # set per episode at reset
         env.safefall_hold = torch.zeros(n, len(spec.ACTION_JOINT_NAMES), device=env.device)
+        env.safefall_side = torch.ones(n, device=env.device)  # latched reflex plank: +1 front, -1 back
+        env.safefall_joint_bias = torch.zeros(n, len(spec.ALL_JOINT_NAMES), device=env.device)  # encoder offsets
 
 
 def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tensor:
     """The fall detector: latch per env once the tilt reaches ``TRIGGER_TILT_DEG``; the facing of the
-    fall (which side should end up down) is taken from the tilt direction at that moment."""
+    fall (which side should end up down) and the reflex side are taken from the tilt direction at that
+    moment, and the reflex side follows the chest only once it clearly faces the other way."""
     _start_buffers(env)
     new = ~env.safefall_triggered & (-gravity_b[:, 2] < sf.TRIGGER_COS)
-    env.safefall_facing[new] = sf.facing_from_gravity(gravity_b)[new]
+    facing = sf.facing_from_gravity(gravity_b)
+    env.safefall_facing[new] = facing[new]
+    env.safefall_side[new] = torch.where(facing[new] >= 0.0, 1.0, -1.0)
     env.safefall_triggered |= new
+    env.safefall_side[:] = sf.update_side(env.safefall_side, gravity_b)
     return env.safefall_triggered
+
+
+def joint_pos_measured(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """joint_pos_rel as the encoders report it: with the per-env calibration offset (randomize_joint_bias)."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    _start_buffers(env)
+    if not hasattr(env, "_safefall_canonical_ids"):
+        env._safefall_canonical_ids = robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]
+    bias = torch.zeros_like(robot.data.joint_pos)
+    bias[:, env._safefall_canonical_ids] = env.safefall_joint_bias
+    return robot.data.joint_pos - robot.data.default_joint_pos + bias
+
+
+def randomize_joint_bias(env: ManagerBasedEnv, env_ids: torch.Tensor | None, joint_names: str = ".*_(Hip|Knee|Ankle)_.*",
+                         offset_range: tuple[float, float] = (-0.03, 0.03)):
+    """Encoder calibration offsets per env (as the team's walking task: legs +-0.03 rad): the joints
+    settle at target - offset and read position + offset."""
+    import re
+
+    _start_buffers(env)
+    ids = env_ids if env_ids is not None else torch.arange(env.num_envs, device=env.device)
+    cols = [i for i, n in enumerate(spec.ALL_JOINT_NAMES) if re.fullmatch(joint_names, n)]
+    lo, hi = offset_range
+    env.safefall_joint_bias[ids[:, None], torch.tensor(cols, device=env.device)] = lo + (hi - lo) * torch.rand(len(ids), len(cols), device=env.device)
 
 
 # ---------------------------------------------------------------------- events
 def reset_to_fall_start(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
-    joint_noise: float = 0.1,
+    joint_noise: float = 0.05,
+    joint_vel_noise: float = 0.1,
     stride_spread: float = 0.25,
     spawn_margin: float = 0.02,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -167,11 +198,13 @@ def reset_to_fall_start(
     pos[:, 2] += spawn_margin  # standing: soles 0-2 cm above the ground (joint noise tilts the feet)
     robot.write_root_pose_to_sim(torch.cat((pos, st["root_quat"]), dim=-1), env_ids=env_ids)
     robot.write_root_velocity_to_sim(torch.cat((st["lin_vel"], st["ang_vel"]), dim=-1), env_ids=env_ids)
-    robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
+    dq = (2.0 * torch.rand_like(q) - 1.0) * joint_vel_noise * (~on).unsqueeze(-1)
+    robot.write_joint_state_to_sim(q, dq, env_ids=env_ids)
     _start_buffers(env)
     env.safefall_direction[env_ids] = st["direction"]
     env.safefall_facing[env_ids] = st["facing"]
     env.safefall_triggered[env_ids] = on  # plank starts are the policy's from the first step
+    env.safefall_side[env_ids] = 1.0 - 2.0 * st["plank"].clamp_min(0).float()  # falls: set at the trigger
     env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 
 

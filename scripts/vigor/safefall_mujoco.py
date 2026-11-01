@@ -55,7 +55,11 @@ GAINS = [
     (r"(AAHead_yaw|Head_pitch)", 10.0, 0.5, 6.0, 0.001),
 ]
 # regularisation (per-second weights, as in the Isaac SafeFall config)
-REG = {"action_rate": -0.01, "joint_pos_limit": -1.0, "joint_vel": -1.0e-4, "joint_acc": -2.5e-7, "torque": -1.0e-5}
+REG = {"action_rate": -0.01, "joint_pos_limit": -1.0, "joint_vel": -1.0e-4, "joint_acc": -2.5e-7, "torque": -1.0e-5,
+       "residual": sf.RESIDUAL_WEIGHT}
+# as the Isaac task / the team's walking task: observation noise (raw units), leg encoder offsets, kick
+NOISE = {"ang_vel": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 0.5}
+ENCODER_OFFSET, KICK_AT_S, KICK_SPEED = 0.03, 4.0, 0.5
 
 
 def gains(name):
@@ -128,6 +132,11 @@ class SafeFallEnv:
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
         self.passive = False
+        self.noise = True  # observation noise on the actor (off for eval)
+        self.side = np.ones(n)  # latched reflex plank: +1 front, -1 back
+        legs = [i for i, nm in enumerate(names) if re.search(r"_(Hip|Knee|Ankle)_", nm)]
+        self.bias = np.zeros((n, len(names)))  # encoder calibration offsets (startup)
+        self.bias[:, legs] = self.rng.uniform(-ENCODER_OFFSET, ENCODER_OFFSET, (n, len(legs)))
         self.finished: list[dict] = []
         self.reset(np.arange(n))
         self.obs, self.critic = self._observe()
@@ -157,7 +166,7 @@ class SafeFallEnv:
         for k, i in enumerate(ids):
             d = self.datas[i]
             mujoco.mj_resetData(self.m, d)
-            q = self.default + self.rng.uniform(-0.1, 0.1, len(self.default))
+            q = self.default + self.rng.uniform(-0.05, 0.05, len(self.default))
             q[self.head_ids] = self.default[self.head_ids]
             for leg, sgn in (("Left", 1), ("Right", -1)):  # mid-stride leg spread
                 q[spec.ALL_JOINT_NAMES.index(f"{leg}_Hip_Pitch")] += sgn * self.rng.uniform(-0.25, 0.25)
@@ -184,6 +193,9 @@ class SafeFallEnv:
             self.facing[i] = float(st["facing"][k])
             self.triggered[i] = bool(st["plank"][k] >= 0)
             self.hold[i] = q
+            self.side[i] = 1.0 - 2.0 * max(int(st["plank"][k]), 0)  # falls: set at the trigger
+            if st["plank"][k] < 0:
+                d.qvel[self.vadr] = self.rng.uniform(-0.1, 0.1, len(q))
             self.prev_qvel[i] = d.qvel[self.vadr]
             self.prev_z[i] = d.xpos[self.head_body, 2], d.xpos[self.trunk_body, 2]
         self.last_action[ids] = 0.0
@@ -212,15 +224,22 @@ class SafeFallEnv:
 
     def _observe(self):
         qpos, qvel, quat, grav = self._frame()
-        frame = np.concatenate([ANG_VEL_SCALE * np.clip(qvel[:, 3:6], -ANG_VEL_CLIP, ANG_VEL_CLIP), grav,
-                                qpos[:, self.qadr] - self.default,
-                                JOINT_VEL_SCALE * np.clip(qvel[:, self.vadr], -JOINT_VEL_CLIP, JOINT_VEL_CLIP), self.last_action], 1)
-        self.hist = np.concatenate([self.hist[:, 1:], frame[:, None]], 1)
+        def frame(ang, g, jp, jv):
+            return np.concatenate([ANG_VEL_SCALE * np.clip(ang, -ANG_VEL_CLIP, ANG_VEL_CLIP), g, jp,
+                                   JOINT_VEL_SCALE * np.clip(jv, -JOINT_VEL_CLIP, JOINT_VEL_CLIP), self.last_action], 1)
+
+        ang, jp, jv = qvel[:, 3:6], qpos[:, self.qadr] - self.default, qvel[:, self.vadr]
+        clean = frame(ang, grav, jp, jv)  # the critic's
+        g, jp = grav, jp + self.bias  # the actor's: encoder offsets, noise
+        if self.noise:
+            u = lambda x, r: x + self.rng.uniform(-r, r, x.shape)  # noqa: E731
+            ang, g, jp, jv = u(ang, NOISE["ang_vel"]), u(g, NOISE["gravity"]), u(jp, NOISE["joint_pos"]), u(jv, NOISE["joint_vel"])
+        self.hist = np.concatenate([self.hist[:, 1:], frame(ang, g, jp, jv)[:, None]], 1)
         lin_b = tm.quat_apply_inverse(quat, torch.as_tensor(qvel[:, :3], dtype=torch.float32)).numpy().clip(-LIN_VEL_CLIP, LIN_VEL_CLIP)
         heights = np.stack([[d.xpos[self.trunk_body, 2], d.xpos[self.head_body, 2], d.xpos[self.hand_bodies, 2].min()]
                             for d in self.datas])
         forces = np.clip(np.stack([self.peak[:, b].sum(1) for b in self.body.values()], 1) / sf.WEIGHT, 0.0, CONTACT_CLIP)
-        critic = np.concatenate([frame, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None], self.triggered[:, None]], 1)
+        critic = np.concatenate([clean, lin_b, heights, forces, -grav[:, 2:3], self.facing[:, None], self.triggered[:, None]], 1)
         return (torch.as_tensor(self.hist.reshape(self.num_envs, -1), dtype=torch.float32),
                 torch.as_tensor(critic, dtype=torch.float32))
 
@@ -235,10 +254,16 @@ class SafeFallEnv:
         self.prev_targets[:] = self.targets
         g = tm.projected_gravity(torch.as_tensor(np.stack([d.qpos[3:7] for d in self.datas]), dtype=torch.float32))
         new = ~self.triggered & (-g[:, 2].numpy() < sf.TRIGGER_COS)  # the fall detector (as Isaac)
-        self.facing[new] = sf.facing_from_gravity(g).numpy()[new]
+        facing = sf.facing_from_gravity(g).numpy()
+        self.facing[new] = facing[new]
+        self.side[new] = np.where(facing[new] >= 0.0, 1.0, -1.0)
         self.triggered |= new
-        policy = sf.reflex_targets(g).numpy() + self.scale * a  # offsets from the hand-off plank
+        self.side = sf.update_side(torch.as_tensor(self.side, dtype=torch.float32), g).numpy().astype(np.float64)
+        # offsets from the hand-off plank, in encoder coordinates (joints settle at target - offset)
+        policy = sf.reflex_targets(torch.as_tensor(self.side)).numpy() + self.scale * a - self.bias[:, self.act]
         self.targets[:, self.act] = np.where(self.triggered[:, None], policy, self.hold[:, self.act])
+        for i in np.where(self.episode_length_buf.numpy() == int(round(KICK_AT_S / self.step_dt)))[0]:
+            self.datas[i].qvel[:2] += self.rng.uniform(-KICK_SPEED, KICK_SPEED, 2)
         list(self.pool.map(self._substeps, self.chunks))
         self.episode_length_buf += 1
 
@@ -262,6 +287,7 @@ class SafeFallEnv:
             "joint_vel": np.square(qd[:, self.act]).sum(1),
             "joint_acc": np.square((qd - self.prev_qvel) / dt)[:, self.act].sum(1),
             "torque": np.square(tau[:, self.act]).sum(1),
+            "residual": np.square(a).sum(1),
         }
         for k, v in reg.items():
             parts[k] = T(REG[k] * dt * v)
@@ -434,7 +460,10 @@ def main():
 
     if a.mode == "eval":
         sf.PLANK_START_PROB = 0.0  # falls only
+        global KICK_SPEED
+        KICK_SPEED = 0.0  # the fall itself, as the Isaac play config
     env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed)
+    env.noise = a.mode == "train"
     runner = OnPolicyRunner(env, train_cfg(a.iters), log_dir=a.out if a.mode == "train" else None, device="cpu")
     if a.mode == "train":
         runner.learn(num_learning_iterations=a.iters, init_at_random_ep_len=True)
