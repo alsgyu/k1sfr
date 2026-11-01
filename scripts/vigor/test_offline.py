@@ -196,8 +196,40 @@ def test_safefall_math():
     tr = sf.OutcomeTracker(n)
     tr.update(state(**planks))
     ends = sf.end_poses(tr.close(torch.arange(n)))
-    assert ends["front"]["episodes"] == n and ends["back"]["episodes"] == 0
+    assert ends["front"]["episodes"] == n and ends["back"]["episodes"] == 0 and len(ends["front"]["samples"]) == n
     assert torch.allclose(torch.tensor(ends["front"]["joint_pos_median"]), torch.tensor(sf.PLANK_POSES["front"]), atol=1e-3)
+
+
+def test_safefall_symmetry():
+    """The Isaac augmentation reads the layout from the observation manager and mirrors every term."""
+    import types
+
+    import safefall_math as sf
+    import safefall_symmetry as sym
+
+    joints = list(spec.ALL_JOINT_NAMES)
+    robot_order = joints[1::2] + joints[0::2]  # the articulation's order differs from the canonical one
+    terms = [("base_ang_vel", 3), ("projected_gravity", 3), ("joint_pos", 22), ("joint_vel", 22), ("last_action", 20)]
+    h = 3
+    om = types.SimpleNamespace(active_terms={"policy": [t for t, _ in terms]}, group_obs_term_dim={"policy": [(h * d,) for _, d in terms]})
+    base = types.SimpleNamespace(observation_manager=om, scene={"robot": types.SimpleNamespace(data=types.SimpleNamespace(joint_names=robot_order))})
+    env = types.SimpleNamespace(unwrapped=base)
+    obs, act = torch.randn(5, h * 70), torch.randn(5, 20)
+    aug_obs, aug_act = sym.data_augmentation_func(obs=obs, actions=act, env=env, obs_type="policy")
+    assert aug_obs.shape == (10, h * 70) and torch.equal(aug_obs[:5], obs) and torch.equal(aug_act[:5], act)
+    twice, _ = sym.data_augmentation_func(obs=aug_obs[5:], env=env, obs_type="policy")
+    assert torch.allclose(twice[5:], obs)  # mirroring twice is the identity
+    # a left hip roll in the newest joint_pos frame becomes the negated right hip roll in the same frame
+    probe = torch.zeros(1, h * 70)
+    jp = 2 * 3 * h  # joint_pos block: after ang vel and gravity (h frames of 3 each)
+    probe[0, jp + 2 * 22 + robot_order.index("Left_Hip_Roll")] = 0.3
+    m, _ = sym.data_augmentation_func(obs=probe, env=env, obs_type="policy")
+    assert torch.isclose(m[1, jp + 2 * 22 + robot_order.index("Right_Hip_Roll")], torch.tensor(-0.3))
+    assert torch.isclose(m[1, jp + 2 * 22 + robot_order.index("Left_Hip_Roll")], torch.tensor(0.0))
+    # the hand-off planks and the reflex are symmetric, so mirrored actions mean mirrored joint targets
+    for pose in sf.PLANK_POSES.values():
+        assert torch.allclose(sf.mirror(torch.tensor(pose), "joints", spec.ALL_JOINT_NAMES), torch.tensor(pose))
+    assert torch.equal(sf.mirror(torch.arange(7.0), "contacts"), torch.tensor([0.0, 1, 3, 2, 4, 5, 6]))
 
 
 def test_teacher_ppo():
