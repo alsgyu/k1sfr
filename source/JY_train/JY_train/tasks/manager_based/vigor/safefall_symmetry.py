@@ -32,6 +32,7 @@ TERM_KINDS = {
     "contact_forces": "contacts",
     "facing": "none",
     "triggered": "none",
+    "fall_time": "none",
 }
 
 
