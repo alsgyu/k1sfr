@@ -58,7 +58,7 @@ class ReflexJointPositionAction(JointPositionAction):
     from the step the fall detector triggers (``update_trigger``); before that the start pose is held
     and the actions are ignored (on the robot the walking policy runs until then).
 
-    Zero action falls into the hand-off plank on the side the chest faces and holds it; the policy
+    Zero action falls into the hand-off pose of the latched side and holds it; the policy
     learns offsets from there.  The joints must be ``spec.ACTION_JOINT_NAMES`` in that order."""
 
     cfg: ReflexJointPositionActionCfg

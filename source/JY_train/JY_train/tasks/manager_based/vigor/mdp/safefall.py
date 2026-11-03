@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 class _Ids:
     def __init__(self, robot: Articulation, sensor: ContactSensor):
         self.groups = {g: sensor.find_bodies(names, preserve_order=True)[0] for g, names in sf.CONTACT_GROUPS.items()}
+        self.bodies = sensor.find_bodies(sf.CONTACT_BODIES, preserve_order=True)[0]
         self.head = robot.find_bodies(sf.HEAD_BODY)[0][0]
         self.hands = robot.find_bodies(sf.HAND_BODIES, preserve_order=True)[0]
         self.joints = robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]
@@ -33,7 +34,8 @@ class _Ids:
 def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str = "contact_forces") -> sf.FallState:
     """FallState of every env, computed once per env step (all reward terms and the monitor share it).
 
-    Contact forces are the peak over the sensor history, which spans the policy step's physics substeps."""
+    Contact forces are the peak (contact detection) and the mean (impulse / step, the impact) over the sensor
+    history, which spans the policy step's physics substeps."""
     cache = getattr(env, "_safefall_cache", None)
     step = getattr(env, "common_step_counter", 0)
     if cache is not None and cache[0] == step:
@@ -43,19 +45,26 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
     if not hasattr(env, "_safefall_ids"):
         env._safefall_ids = _Ids(robot, sensor)
     ids = env._safefall_ids
-    peak = sensor.data.net_forces_w_history.norm(dim=-1).amax(dim=1)  # (N, bodies)
+    history = sensor.data.net_forces_w_history.norm(dim=-1)  # (N, substeps, bodies)
+    peak = history.amax(dim=1)
     ground = env.scene.env_origins[:, 2]  # flat ground
     pos, vel = robot.data.body_pos_w, robot.data.body_lin_vel_w
+    fist_pos, fist_vel = sf.fist_tips(pos[:, ids.hands], robot.data.body_quat_w[:, ids.hands], vel[:, ids.hands],
+                                      robot.data.body_ang_vel_w[:, ids.hands])
     state = sf.FallState(
         force={g: peak[:, i].sum(dim=-1) for g, i in ids.groups.items()},
+        body_force=history[:, :, ids.bodies].mean(dim=1),
         head_h=pos[:, ids.head, 2] - ground,
         trunk_h=robot.data.root_pos_w[:, 2] - ground,
         hand_h=pos[:, ids.hands, 2].min(dim=-1).values - ground,
+        fist_h=fist_pos[..., 2] - ground.unsqueeze(-1),
+        fist_vz=fist_vel[..., 2],
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
         gravity_b=robot.data.projected_gravity_b,
         q=robot.data.joint_pos[:, ids.joints],
         facing=getattr(env, "safefall_facing", torch.zeros_like(ground)),
+        side=getattr(env, "safefall_side", torch.ones_like(ground)),
     )
     env._safefall_cache = (step, state, sf.terms(state))
     return state
@@ -120,7 +129,7 @@ def _start_buffers(env: ManagerBasedEnv):
         env.safefall_facing = torch.zeros(n, device=env.device)
         env.safefall_triggered = torch.ones(n, dtype=torch.bool, device=env.device)  # set per episode at reset
         env.safefall_hold = torch.zeros(n, len(spec.ACTION_JOINT_NAMES), device=env.device)
-        env.safefall_side = torch.ones(n, device=env.device)  # latched reflex plank: +1 front, -1 back
+        env.safefall_side = torch.ones(n, device=env.device)  # latched reflex pose: +1 front, -1 back
         env.safefall_joint_bias = torch.zeros(n, len(spec.ALL_JOINT_NAMES), device=env.device)  # encoder offsets
 
 
@@ -172,8 +181,8 @@ def reset_to_fall_start(
     spawn_margin: float = 0.02,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Standing or walking on the ground and pushed in a random direction, or held in a hand-off
-    plank (``safefall_math.sample_starts``).  The start pose is held until the fall detector triggers."""
+    """Standing or walking on the ground and pushed in a random direction, or resting in a hand-off
+    pose (``safefall_math.sample_starts``).  The start pose is held until the fall detector triggers."""
     robot: Articulation = env.scene[asset_cfg.name]
     n = len(env_ids)
     st = sf.sample_starts(n, env.device)
@@ -186,11 +195,11 @@ def reset_to_fall_start(
     q[:, robot.find_joints("Left_Hip_Pitch")[0][0]] += spread
     q[:, robot.find_joints("Right_Hip_Pitch")[0][0]] -= spread
     q[:, robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]] += st["joint_offset"]  # lifted leg
-    planks = torch.tensor([sf.PLANK_POSES["front"], sf.PLANK_POSES["back"]], device=env.device)[st["plank"].clamp_min(0)]
-    on = st["plank"] >= 0
+    poses = torch.tensor([sf.HANDOFF_POSES["front"], sf.HANDOFF_POSES["back"]], device=env.device)[st["handoff"].clamp_min(0)]
+    on = st["handoff"] >= 0
     body = len(spec.HEAD_JOINT_NAMES)  # the head stays held at its default
     joints = robot.find_joints(spec.ALL_JOINT_NAMES[body:], preserve_order=True)[0]
-    q[:, joints] = torch.where(on.unsqueeze(-1), planks[:, body:] + 0.5 * noise[:, joints], q[:, joints])
+    q[:, joints] = torch.where(on.unsqueeze(-1), poses[:, body:] + 0.5 * noise[:, joints], q[:, joints])
     limits = robot.data.soft_joint_pos_limits[env_ids]
     q = torch.clamp(q, limits[..., 0], limits[..., 1])
 
@@ -203,8 +212,8 @@ def reset_to_fall_start(
     _start_buffers(env)
     env.safefall_direction[env_ids] = st["direction"]
     env.safefall_facing[env_ids] = st["facing"]
-    env.safefall_triggered[env_ids] = on  # plank starts are the policy's from the first step
-    env.safefall_side[env_ids] = 1.0 - 2.0 * st["plank"].clamp_min(0).float()  # falls: set at the trigger
+    env.safefall_triggered[env_ids] = on  # hand-off starts are the policy's from the first step
+    env.safefall_side[env_ids] = 1.0 - 2.0 * st["handoff"].clamp_min(0).float()  # falls: set at the trigger
     env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 
 
@@ -218,7 +227,7 @@ class SafeFallMonitor(CommandTerm):
 
     def __init__(self, cfg: SafeFallMonitorCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        self.tracker = sf.OutcomeTracker(self.num_envs, self.device)
+        self.tracker = sf.OutcomeTracker(self.num_envs, self.device, dt=env.step_dt)
         self.metrics.update(self.tracker.v)  # same tensors: CommandTerm.reset logs and zeroes them
         self.direction = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.collect, self.finished = False, []

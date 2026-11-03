@@ -1,17 +1,17 @@
 """Evaluate / watch the K1 safe-fall policy (Isaac).
 
-    # numbers over 256 falls (head hit rate, peak impacts, arm load share), split by fall direction
+    # numbers over 256 falls (head hit rate, impact, arm load share), split by fall direction
     python scripts/vigor/eval_safefall.py --run flat --headless
     # watch forward falls in the GUI at real speed, camera on env 0
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --num_envs 16
-    # baseline: zero actions = the reflex alone (reach into the hand-off plank on the side the chest faces)
+    # baseline: zero actions = the reflex alone (reach into the hand-off pose of the latched side)
     python scripts/vigor/eval_safefall.py --passive --headless
-    # after holding the plank, switch to the robot's damping mode (kp = 0) and watch it lower down
+    # after the hand-off pose, switch to the robot's damping mode (kp = 0) and watch it lower down
     python scripts/vigor/eval_safefall.py --run flat --direction forward --follow --real_time --release_after 2.5
     # which checkpoint is best: every 500th of the run on the same falls, ranked by safefall_math.score
     python scripts/vigor/eval_safefall.py --run flat --sweep 500 --num_envs 256 --headless
 
-Writes logs/vigor/eval/<timestamp>_safefall/summary.json, end_poses.json (the planks the falls ended
+Writes logs/vigor/eval/<timestamp>_safefall/summary.json, end_poses.json (the poses the falls ended
 in, per side, next to the target hand-off poses: for the get-up team) and videos/ with --video.
 """
 
@@ -105,7 +105,7 @@ def sweep(env, runner, run_dir: str, every: int, out_dir: str):
 
 def main():
     device = args_cli.device or "cuda:0"
-    sf.PLANK_START_PROB = 0.0  # falls only
+    sf.HANDOFF_START_PROB = 0.0  # falls only
     if args_cli.direction:
         sf.DIRECTIONS = tuple((a, float(name == args_cli.direction)) for (a, _), name in zip(sf.DIRECTIONS, sf.DIRECTION_NAMES))
     env_cfg = parse_env_cfg(args_cli.task, device=device, num_envs=args_cli.num_envs)
@@ -140,7 +140,7 @@ def main():
     monitor = base.command_manager.get_term("monitor")
     monitor.collect = True
     robot = base.scene["robot"]
-    release = sf.OutcomeTracker(base.num_envs, base.device)  # outcomes of the lowering phase alone
+    release = sf.OutcomeTracker(base.num_envs, base.device, dt=base.step_dt)  # outcomes of the lowering phase alone
     gains = {k: (a.stiffness.clone(), a.damping.clone()) for k, a in robot.actuators.items()}
     obs, _ = env.get_observations()
     with torch.inference_mode():
@@ -160,7 +160,7 @@ def main():
                 release.update(fall_state(base), live=released & ~dones.bool())
                 done_ids = dones.nonzero(as_tuple=True)[0]
                 for e, r in zip(monitor.finished[n_before:], release.close(done_ids)):
-                    e |= {f"release_{k}": r[k] for k in ("head_hit", "trunk_peak", "head_peak", "leg_peak")}
+                    e |= {f"release_{k}": r[k] for k in ("head_hit", "trunk_peak", "head_peak", "impact")}
             if args_cli.real_time:
                 time.sleep(max(0.0, base.step_dt - (time.time() - t0)))
     eps = monitor.finished[: args_cli.episodes]
