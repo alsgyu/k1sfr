@@ -3,7 +3,7 @@
 Builds the K1 from the same URDF and PD gains / torque limits as the Isaac task, starts
 episodes from the same falls (``safefall_math.sample_starts``), scores them with the same
 reward (``safefall_math.reward`` + the regularisation weights of the Isaac config), trains a
-PPO policy with rsl_rl and compares it against the reflex alone (zero actions: reach into the hand-off plank).
+PPO policy with rsl_rl and compares it against the reflex alone (zero actions: reach into the hand-off pose).
 
     python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 800 --out ~/vigor_work/safefall_mj
     python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/model_800.pt --render ~/vigor_work/safefall_mj/rollouts.png
@@ -110,6 +110,7 @@ class SafeFallEnv:
         kp = np.array([gains(n)[0] for n in names])
         self.scale = (0.5 * effort / kp)[self.act]
         self.body = {g: np.array([self.m.body(b).id for b in bs]) for g, bs in sf.CONTACT_GROUPS.items()}
+        self.contact_bodies = np.array([self.m.body(b).id for b in sf.CONTACT_BODIES])
         self.head_body, self.trunk_body = self.m.body(sf.HEAD_BODY).id, self.m.body("Trunk").id
         self.hand_bodies = np.array([self.m.body(b).id for b in sf.HAND_BODIES])
         self.num_actions = len(self.act)
@@ -120,10 +121,12 @@ class SafeFallEnv:
         self.targets = np.tile(self.default, (n, 1))
         self.prev_targets = self.targets.copy()
         self.delay = np.zeros(n, dtype=int)
-        self.peak = np.zeros((n, self.m.nbody))
+        self.peak = np.zeros((n, self.m.nbody))  # contact force per body over the step's substeps: peak, mean
+        self.mean_force = np.zeros((n, self.m.nbody))
         self.last_action = np.zeros((n, self.num_actions))
         self.prev_qvel = np.zeros((n, len(names)))
         self.prev_z = np.zeros((n, 2))
+        self.prev_fist = np.zeros((n, 2))  # fist tip heights at the last step (velocities by difference, as head / trunk)
         self.hist = np.zeros((n, HISTORY, 70))
         self.direction = np.zeros(n, dtype=int)
         self.facing = np.zeros(n)
@@ -133,7 +136,7 @@ class SafeFallEnv:
         self.tracker = sf.OutcomeTracker(n)
         self.passive = False
         self.noise = True  # observation noise on the actor (off for eval)
-        self.side = np.ones(n)  # latched reflex plank: +1 front, -1 back
+        self.side = np.ones(n)  # latched reflex pose: +1 front, -1 back
         legs = [i for i, nm in enumerate(names) if re.search(r"_(Hip|Knee|Ankle)_", nm)]
         self.bias = np.zeros((n, len(names)))  # encoder calibration offsets (startup)
         self.bias[:, legs] = self.rng.uniform(-ENCODER_OFFSET, ENCODER_OFFSET, (n, len(legs)))
@@ -171,10 +174,10 @@ class SafeFallEnv:
             for leg, sgn in (("Left", 1), ("Right", -1)):  # mid-stride leg spread
                 q[spec.ALL_JOINT_NAMES.index(f"{leg}_Hip_Pitch")] += sgn * self.rng.uniform(-0.25, 0.25)
             q += st["joint_offset"][k].numpy()  # lifted leg of walking starts
-            if st["plank"][k] >= 0:  # held in a hand-off plank (head stays at its default)
+            if st["handoff"][k] >= 0:  # resting in a hand-off pose (head stays at its default)
                 body = len(self.head_ids)
-                plank = np.array(sf.PLANK_POSES[("front", "back")[int(st["plank"][k])]])
-                q[body:] = plank[body:] + self.rng.uniform(-0.05, 0.05, len(q) - body)
+                pose = np.array(sf.HANDOFF_POSES[("front", "back")[int(st["handoff"][k])]])
+                q[body:] = pose[body:] + self.rng.uniform(-0.05, 0.05, len(q) - body)
             q = np.clip(q, lo, hi)
             d.qpos[self.qadr] = q
             d.qpos[3:7] = st["root_quat"][k].numpy()
@@ -191,29 +194,37 @@ class SafeFallEnv:
             self.delay[i] = self.rng.integers(0, DECIMATION)
             self.direction[i] = int(st["direction"][k])
             self.facing[i] = float(st["facing"][k])
-            self.triggered[i] = bool(st["plank"][k] >= 0)
+            self.triggered[i] = bool(st["handoff"][k] >= 0)
             self.hold[i] = q
-            self.side[i] = 1.0 - 2.0 * max(int(st["plank"][k]), 0)  # falls: set at the trigger
-            if st["plank"][k] < 0:
+            self.side[i] = 1.0 - 2.0 * max(int(st["handoff"][k]), 0)  # falls: set at the trigger
+            if st["handoff"][k] < 0:
                 d.qvel[self.vadr] = self.rng.uniform(-0.1, 0.1, len(q))
             self.prev_qvel[i] = d.qvel[self.vadr]
             self.prev_z[i] = d.xpos[self.head_body, 2], d.xpos[self.trunk_body, 2]
+            self.prev_fist[i] = self._fist_z(np.stack([d.xpos[self.hand_bodies]]), np.stack([d.xquat[self.hand_bodies]]))[0]
         self.last_action[ids] = 0.0
         self.episode_length_buf[torch.as_tensor(ids)] = 0
         for k in self.ep_sums:
             self.ep_sums[k][ids] = 0.0
         self.hist[ids] = 0.0
 
+    @staticmethod
+    def _fist_z(hand_pos: np.ndarray, hand_quat: np.ndarray) -> np.ndarray:
+        pos, _ = sf.fist_tips(torch.as_tensor(hand_pos, dtype=torch.float32), torch.as_tensor(hand_quat, dtype=torch.float32))
+        return pos[..., 2].numpy()
+
     def _substeps(self, chunk):
         for i in chunk:
             d = self.datas[i]
-            peak = np.zeros(self.m.nbody)
+            peak, total = np.zeros(self.m.nbody), np.zeros(self.m.nbody)
             for k in range(DECIMATION):
                 d.ctrl[:] = self.targets[i] if k >= self.delay[i] else self.prev_targets[i]
                 mujoco.mj_step(self.m, d)
                 mujoco.mj_rnePostConstraint(self.m, d)
-                np.maximum(peak, np.linalg.norm(d.cfrc_ext[:, 3:], axis=1), out=peak)
-            self.peak[i] = peak
+                force = np.linalg.norm(d.cfrc_ext[:, 3:], axis=1)
+                np.maximum(peak, force, out=peak)
+                total += force
+            self.peak[i], self.mean_force[i] = peak, total / DECIMATION
 
     def _frame(self):
         qpos = np.stack([d.qpos for d in self.datas])
@@ -259,7 +270,7 @@ class SafeFallEnv:
         self.side[new] = np.where(facing[new] >= 0.0, 1.0, -1.0)
         self.triggered |= new
         self.side = sf.update_side(torch.as_tensor(self.side, dtype=torch.float32), g).numpy().astype(np.float64)
-        # offsets from the hand-off plank, in encoder coordinates (joints settle at target - offset)
+        # offsets from the hand-off pose, in encoder coordinates (joints settle at target - offset)
         policy = sf.reflex_targets(torch.as_tensor(self.side)).numpy() + self.scale * a - self.bias[:, self.act]
         self.targets[:, self.act] = np.where(self.triggered[:, None], policy, self.hold[:, self.act])
         for i in np.where(self.episode_length_buf.numpy() == int(round(KICK_AT_S / self.step_dt)))[0]:
@@ -272,11 +283,15 @@ class SafeFallEnv:
         head_z = np.array([d.xpos[self.head_body, 2] for d in self.datas])
         trunk_z = np.array([d.xpos[self.trunk_body, 2] for d in self.datas])
         hand_z = np.array([d.xpos[self.hand_bodies, 2].min() for d in self.datas])
+        fist_z = self._fist_z(np.stack([d.xpos[self.hand_bodies] for d in self.datas]),
+                              np.stack([d.xquat[self.hand_bodies] for d in self.datas]))
         f = {g: torch.as_tensor(self.peak[:, b].sum(1), dtype=torch.float32) for g, b in self.body.items()}
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
-        state = sf.FallState(force=f, head_h=T(head_z), trunk_h=T(trunk_z), hand_h=T(hand_z),
-                             head_vz=T((head_z - self.prev_z[:, 0]) / dt), trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt),
-                             gravity_b=T(grav), q=T(qpos[:, self.qadr]), facing=T(self.facing))
+        state = sf.FallState(force=f, body_force=T(self.mean_force[:, self.contact_bodies]), head_h=T(head_z), trunk_h=T(trunk_z),
+                             hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt),
+                             head_vz=T((head_z - self.prev_z[:, 0]) / dt),
+                             trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]),
+                             facing=T(self.facing), side=T(self.side))
         rew, parts = sf.reward(state, dt)
         lo, hi = self._soft_limits()
         q, qd = qpos[:, self.qadr], qvel[:, self.vadr]
@@ -294,7 +309,7 @@ class SafeFallEnv:
             rew = rew + parts[k]
         on = T(self.triggered)  # nothing is rewarded before the fall detector hands over
         rew, parts = rew * on, {k: v * on for k, v in parts.items()}
-        self.last_action, self.prev_qvel, self.prev_z = a, qd.copy(), np.stack([head_z, trunk_z], 1)
+        self.last_action, self.prev_qvel, self.prev_z, self.prev_fist = a, qd.copy(), np.stack([head_z, trunk_z], 1), fist_z
 
         self.tracker.update(state)
         self.last_state = state
@@ -377,7 +392,7 @@ def render(env: SafeFallEnv, policy, path: str, per_dir: int = 1):
     cam = mujoco.MjvCamera()
     cam.distance, cam.elevation = 1.8, -10
     rows = []
-    for want in range(len(sf.DIRECTIONS)):  # fall directions (not the plank starts)
+    for want in range(len(sf.DIRECTIONS)):  # fall directions (not the hand-off starts)
         while True:  # resample env 0 until it starts in the wanted direction
             env.reset(np.array([0]))
             if env.direction[0] == want:
@@ -448,7 +463,7 @@ def main():
     p.add_argument("--iters", type=int, default=800)
     p.add_argument("--out", default=os.path.expanduser("~/vigor_work/safefall_mj"))
     p.add_argument("--ckpt", default=None)
-    p.add_argument("--passive", action="store_true", help="eval zero actions: the reflex alone (reach into the hand-off plank)")
+    p.add_argument("--passive", action="store_true", help="eval zero actions: the reflex alone (reach into the hand-off pose)")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--render", default=None, help="PNG with side-view frames per fall direction")
@@ -459,7 +474,7 @@ def main():
     from rsl_rl.runners import OnPolicyRunner
 
     if a.mode == "eval":
-        sf.PLANK_START_PROB = 0.0  # falls only
+        sf.HANDOFF_START_PROB = 0.0  # falls only
         global KICK_SPEED
         KICK_SPEED = 0.0  # the fall itself, as the Isaac play config
     env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed)

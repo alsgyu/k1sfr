@@ -1,11 +1,13 @@
-"""K1 safe fall on flat ground: land on the fists and hold a fist plank.
+"""K1 safe fall on flat ground: spread the landing over fists, knees / hips and feet and end in a
+multi-contact hand-off pose.
 
-No demonstrations and no stand-up (another team handles getting up).  Episodes start
-from the walking stance tipping or pushed in a random direction and last 4 s; the reward
-(``safefall_math``) lets only fists and feet touch the ground, rewards holding the body up
-on the fists with stiff arms in one of two fixed hand-off planks for the get-up, penalises
-head, trunk, knee/thigh and forearm contact, and keeps forward falls chest down and backward
-falls chest up.
+No demonstrations and no stand-up (another team handles getting up).  Episodes start standing
+or walking, pushed in a random direction, and hand over to the policy at a 20 deg tilt; the
+reward (``safefall_math``) minimises a fragility-weighted sum of squared impacts over all links
+(so the load is shared and the joints give), keeps head, chest, back and upper arms off the
+ground, rewards resting in one of two fixed hand-off poses for the get-up (kneeling on fists,
+knees and toes; sitting on the hips with the fists behind), and keeps forward falls chest down
+and backward falls chest up.
 The same task runs on the laptop in MuJoCo (scripts/vigor/safefall_mujoco.py).
 """
 
@@ -73,7 +75,7 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    # offsets from the hand-off plank on the side the chest faces (safefall_math.reflex_targets)
+    # offsets from the hand-off pose of the latched side (safefall_math.reflex_targets)
     joint_pos = mdp.ReflexJointPositionActionCfg(
         asset_name="robot", joint_names=spec.ACTION_JOINT_NAMES, scale=ACTION_SCALE, preserve_order=True
     )
@@ -152,7 +154,7 @@ class EventCfg:
                 "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.05, 0.05)}},
     )
     joint_bias = EventTerm(func=mdp.randomize_joint_bias, mode="startup")  # leg encoder offsets +-0.03 rad
-    # kick every 4 s as the team's walking task: here it lands while the plank is held
+    # kick every 4 s as the team's walking task: here it lands while the hand-off pose is held
     kick = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
@@ -185,19 +187,17 @@ def _reg(term: str, weight: float) -> RewTerm:
 class RewardsCfg:
     # task (safefall_math.WEIGHTS)
     upright = _sf("upright")
-    plank = _sf("plank")
-    fist_share = _sf("fist_share")
+    support = _sf("support")
     hands_lead = _sf("hands_lead")
-    plank_pose = _sf("plank_pose")
+    handoff_pose = _sf("handoff_pose")
+    impact = _sf("impact")
     head_contact = _sf("head_contact")
     head_impact = _sf("head_impact")
     head_low = _sf("head_low")
     trunk_contact = _sf("trunk_contact")
-    leg_contact = _sf("leg_contact")
-    arm_contact = _sf("arm_contact")
-    fist_impact = _sf("fist_impact")
     head_descent = _sf("head_descent")
     trunk_descent = _sf("trunk_descent")
+    fist_descent = _sf("fist_descent")
     facing = _sf("facing")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG), guarded against blow-ups
     action_rate = _reg("action_rate_l2", -0.01)
