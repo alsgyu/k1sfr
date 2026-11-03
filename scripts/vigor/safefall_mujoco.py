@@ -113,6 +113,7 @@ class SafeFallEnv:
         self.contact_bodies = np.array([self.m.body(b).id for b in sf.CONTACT_BODIES])
         self.head_body, self.trunk_body = self.m.body(sf.HEAD_BODY).id, self.m.body("Trunk").id
         self.hand_bodies = np.array([self.m.body(b).id for b in sf.HAND_BODIES])
+        self.foot_bodies = np.array([self.m.body(b).id for b in sf.FOOT_BODIES])
         self.num_actions = len(self.act)
         self.max_episode_length = int(round(EPISODE_S / (DT * DECIMATION)))
         self.step_dt = DT * DECIMATION
@@ -127,10 +128,12 @@ class SafeFallEnv:
         self.prev_qvel = np.zeros((n, len(names)))
         self.prev_z = np.zeros((n, 2))
         self.prev_fist = np.zeros((n, 2))  # fist tip heights at the last step (velocities by difference, as head / trunk)
-        self.hist = np.zeros((n, HISTORY, 70))
+        self.hist = np.zeros((n, HISTORY, 71))
         self.direction = np.zeros(n, dtype=int)
         self.facing = np.zeros(n)
         self.triggered = np.ones(n, dtype=bool)  # the fall detector has handed over (set per episode at reset)
+        self.fall_time = np.zeros(n)  # since the trigger [s]
+        self.fist_down = np.zeros(n, dtype=bool)  # a fist has touched since the trigger
         self.hold = np.tile(self.default, (n, 1))  # start pose, held until the trigger
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
@@ -195,6 +198,8 @@ class SafeFallEnv:
             self.direction[i] = int(st["direction"][k])
             self.facing[i] = float(st["facing"][k])
             self.triggered[i] = bool(st["handoff"][k] >= 0)
+            self.fall_time[i] = 0.0
+            self.fist_down[i] = bool(st["handoff"][k] >= 0)  # resting on them already
             self.hold[i] = q
             self.side[i] = 1.0 - 2.0 * max(int(st["handoff"][k]), 0)  # falls: set at the trigger
             if st["handoff"][k] < 0:
@@ -237,7 +242,8 @@ class SafeFallEnv:
         qpos, qvel, quat, grav = self._frame()
         def frame(ang, g, jp, jv):
             return np.concatenate([ANG_VEL_SCALE * np.clip(ang, -ANG_VEL_CLIP, ANG_VEL_CLIP), g, jp,
-                                   JOINT_VEL_SCALE * np.clip(jv, -JOINT_VEL_CLIP, JOINT_VEL_CLIP), self.last_action], 1)
+                                   JOINT_VEL_SCALE * np.clip(jv, -JOINT_VEL_CLIP, JOINT_VEL_CLIP), self.last_action,
+                                   np.minimum(self.fall_time, sf.FALL_TIME_MAX)[:, None]], 1)
 
         ang, jp, jv = qvel[:, 3:6], qpos[:, self.qadr] - self.default, qvel[:, self.vadr]
         clean = frame(ang, grav, jp, jv)  # the critic's
@@ -268,10 +274,12 @@ class SafeFallEnv:
         facing = sf.facing_from_gravity(g).numpy()
         self.facing[new] = facing[new]
         self.side[new] = np.where(facing[new] >= 0.0, 1.0, -1.0)
+        self.fall_time = np.where(self.triggered, self.fall_time + self.step_dt, 0.0)
         self.triggered |= new
         self.side = sf.update_side(torch.as_tensor(self.side, dtype=torch.float32), g).numpy().astype(np.float64)
         # offsets from the hand-off pose, in encoder coordinates (joints settle at target - offset)
-        policy = sf.reflex_targets(torch.as_tensor(self.side)).numpy() + self.scale * a - self.bias[:, self.act]
+        reflex = sf.reflex_targets(torch.as_tensor(self.side), torch.as_tensor(self.hold[:, self.act]), torch.as_tensor(self.fall_time))
+        policy = reflex.numpy() + self.scale * a - self.bias[:, self.act]
         self.targets[:, self.act] = np.where(self.triggered[:, None], policy, self.hold[:, self.act])
         for i in np.where(self.episode_length_buf.numpy() == int(round(KICK_AT_S / self.step_dt)))[0]:
             self.datas[i].qvel[:2] += self.rng.uniform(-KICK_SPEED, KICK_SPEED, 2)
@@ -285,10 +293,14 @@ class SafeFallEnv:
         hand_z = np.array([d.xpos[self.hand_bodies, 2].min() for d in self.datas])
         fist_z = self._fist_z(np.stack([d.xpos[self.hand_bodies] for d in self.datas]),
                               np.stack([d.xquat[self.hand_bodies] for d in self.datas]))
+        foot_z = np.stack([d.xpos[self.foot_bodies, 2] for d in self.datas])
         f = {g: torch.as_tensor(self.peak[:, b].sum(1), dtype=torch.float32) for g, b in self.body.items()}
+        fists_before = self.fist_down.copy()
+        self.fist_down |= self.triggered & (sf._on(f["fist_l"]) | sf._on(f["fist_r"])).numpy()
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, body_force=T(self.mean_force[:, self.contact_bodies]), head_h=T(head_z), trunk_h=T(trunk_z),
-                             hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt),
+                             hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt), foot_h=T(foot_z),
+                             fists_before=torch.as_tensor(fists_before),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt),
                              trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]),
                              facing=T(self.facing), side=T(self.side))
@@ -302,7 +314,7 @@ class SafeFallEnv:
             "joint_vel": np.square(qd[:, self.act]).sum(1),
             "joint_acc": np.square((qd - self.prev_qvel) / dt)[:, self.act].sum(1),
             "torque": np.square(tau[:, self.act]).sum(1),
-            "residual": np.square(a).sum(1),
+            "residual": sf.residual(torch.as_tensor(a)).numpy(),
         }
         for k, v in reg.items():
             parts[k] = T(REG[k] * dt * v)
@@ -347,8 +359,10 @@ def _parts(kinds) -> list:
 
 # observation layout for left-right mirroring: one policy frame (the policy sees HISTORY of them), the critic
 _J, _A = list(spec.ALL_JOINT_NAMES), list(spec.ACTION_JOINT_NAMES)
-FRAME_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A)])
+FRAME_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A),
+                      ("none", 1, None)])
 CRITIC_PARTS = _parts([("axial", 3, None), ("polar", 3, None), ("joints", 22, _J), ("joints", 22, _J), ("joints", 20, _A),
+                       ("none", 1, None),
                        ("polar", 3, None), ("none", 3, None), ("contacts", len(sf.CONTACT_GROUPS), None), ("none", 1, None),
                        ("none", 1, None), ("none", 1, None)])
 

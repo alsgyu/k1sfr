@@ -47,6 +47,12 @@ CONTACT_BODIES = [b for bodies in CONTACT_GROUPS.values() for b in bodies]  # Fa
 ARM_BODIES = {"left": ["left_hand_link", "Left_Arm_3", "Left_Arm_2"], "right": ["right_hand_link", "Right_Arm_3", "Right_Arm_2"]}
 HEAD_BODY = "Head_2"
 HAND_BODIES = ["left_hand_link", "right_hand_link"]
+FOOT_BODIES = ["left_foot_link", "right_foot_link"]
+# foot origins (ankles) above this are lifted: standing 0.03 m, kneeling on the toes 0.12, sitting 0.08
+FOOT_FREE = 0.15
+# hip roll / yaw further than this from the hand-off pose spread or twist the legs
+SPREAD_JOINTS = ("Left_Hip_Roll", "Left_Hip_Yaw", "Right_Hip_Roll", "Right_Hip_Yaw")
+SPREAD_FREE = 0.1  # rad
 # fist tip: centre of the rounded far end of hand_link in its frame (the arm points along +-y); it is
 # FIST_TOUCH_H up when the fist touches the ground
 FIST_TIPS = ((0.0, 0.2, 0.0), (0.0, -0.2, 0.0))
@@ -106,6 +112,16 @@ HANDOFF_ROOTS = {"front": (0.274, 1.089), "back": (0.119, -0.292)}
 # sign of chest_z each step flipped the legs between the two poses whenever a side fall rolled through
 # chest-sideways, and the policy flailed its legs.
 SIDE_SWITCH = 0.25  # |chest_z| beyond which the latched side follows the chest (sitting has 0.29, kneeling -0.89)
+# The legs go to the hand-off pose gradually, from the joint targets held at the trigger (smoothstep over
+# LEG_RAMP_S): jumping there at once folded them in the air (feet 0.25-0.4 m up) and put knees or hips down
+# before the fists in 44-100 % of the reflex-only falls.  Front: from about when the fists touch (0.15-0.2 s
+# after the trigger), so the knees come down as the arms give.  Back: at once; reflex-only backward falls
+# hit the head in 22 % with 0.5 s, 29 % with 0.25 s, > 60 % with 0.75 s, and 95 % squatting first (rolls
+# back like a ball).  The arms go to the pose at once (reach for the ground).
+LEG_DELAY_S = {"front": 0.15, "back": 0.0}
+LEG_RAMP_S = 0.5
+FALL_TIME_MAX = 1.0  # s: the actor observes the time since the trigger up to this
+LEG_ACTIONS = [i for i, n in enumerate(spec.ACTION_JOINT_NAMES) if "_Hip_" in n or "_Knee_" in n or "_Ankle_" in n]
 
 
 def update_side(side: torch.Tensor, gravity_b: torch.Tensor) -> torch.Tensor:
@@ -114,17 +130,31 @@ def update_side(side: torch.Tensor, gravity_b: torch.Tensor) -> torch.Tensor:
     return torch.where(chest < -SIDE_SWITCH, 1.0, torch.where(chest > SIDE_SWITCH, -1.0, side))
 
 
-def reflex_targets(side: torch.Tensor) -> torch.Tensor:
+def leg_blend(side: torch.Tensor, fall_time: torch.Tensor) -> torch.Tensor:
+    """How far the legs' reflex has moved from the trigger pose to the hand-off pose (0-1, smoothstep)."""
+    delay = torch.where(side > 0, LEG_DELAY_S["front"], LEG_DELAY_S["back"])
+    x = ((fall_time - delay) / LEG_RAMP_S).clamp(0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def reflex_targets(side: torch.Tensor, hold: torch.Tensor | None = None, fall_time: torch.Tensor | None = None) -> torch.Tensor:
     """Joint targets the policy's actions are offsets from, (N, 20) in spec.ACTION_JOINT_NAMES order.
 
     The hand-off pose of the latched side (``update_side``): with zero action the robot reaches for the
     ground and ends in a pose it holds, and the policy only learns the landing and balance on top.
     Measured from the walking stance instead, holding a plank took actions of -3.4 on shoulder or hip
-    pitch and the policy never kept it.  On the robot this is the same latch on the IMU's projected
-    gravity."""
+    pitch and the policy never kept it.  Given the joint targets held at the trigger (``hold``, same
+    order) and the time since it, the legs blend from those to the pose (``leg_blend``).  On the robot
+    this is the same latch on the IMU's projected gravity, the targets at the switch and the time since."""
     body = len(spec.HEAD_JOINT_NAMES)
     poses = torch.tensor([HANDOFF_POSES["front"][body:], HANDOFF_POSES["back"][body:]], device=side.device)
-    return poses[(side < 0).long()]
+    target = poses[(side < 0).long()]
+    if hold is None:
+        return target
+    w = leg_blend(side, fall_time).unsqueeze(-1)
+    legs = torch.zeros(target.shape[-1], dtype=torch.bool, device=side.device)
+    legs[LEG_ACTIONS] = True
+    return torch.where(legs, hold + w * (target - hold), target)
 
 # per-second weights (the env multiplies by its step dt, as Isaac's RewardManager does).
 # Impacts last only a few 20 ms steps while the pose pays for seconds, so the contact weights are
@@ -147,13 +177,28 @@ WEIGHTS = {
     # the arms.  Swung down by the reflex the fists hit at 2.3-2.8 m/s (the trunk falls at 1.3-1.5), one
     # 20 ms step of 3 body weights through the arm that the impact term alone did not remove
     "fist_descent": -2.0,
+    # head, trunk, upper arms or legs on the ground before any fist has touched: the fists land first
+    "early_contact": -30.0,
+    # per m of foot origin above FOOT_FREE (each foot): the feet stay down
+    "foot_lift": -10.0,
+    # per rad^2 of hip roll / yaw beyond SPREAD_FREE from the hand-off pose: no spread or twisted legs
+    "leg_spread": -10.0,
     # turned round mid-fall (forward fall ending chest up, backward chest down).  Support does not care
     # which side faces the ground, so turning also voids support and handoff_pose and costs more than they pay
     "facing": -5.0,
 }
-# regularisation of the residual on the reflex (per second, per sum of squared actions): leave the
-# reflex only where the landing needs it, no flailing
+# regularisation of the residual on the reflex (per second, per sum of squared actions, legs x RESIDUAL_LEGS):
+# leave the reflex only where the landing needs it, no flailing.  The legs only need to follow the reflex
+# down; with the arms' weight the policy spread and twisted them (hip yaw 0.37 rad)
 RESIDUAL_WEIGHT = -0.01
+RESIDUAL_LEGS = 5.0
+
+
+def residual(actions: torch.Tensor) -> torch.Tensor:
+    """Sum of squared actions with the legs weighted RESIDUAL_LEGS (times RESIDUAL_WEIGHT is the penalty)."""
+    scale = torch.ones(actions.shape[-1], device=actions.device)
+    scale[LEG_ACTIONS] = RESIDUAL_LEGS
+    return (scale * actions.square()).sum(dim=-1)
 
 
 @dataclass
@@ -165,6 +210,8 @@ class FallState:
     hand_h: torch.Tensor  # lower hand origin above the ground [m]
     fist_h: torch.Tensor  # (N, 2) fist tips (FIST_TIPS) above the ground, left / right [m]
     fist_vz: torch.Tensor  # (N, 2) their vertical velocities [m/s]
+    foot_h: torch.Tensor  # (N, 2) foot origins (FOOT_BODIES) above the ground [m]
+    fists_before: torch.Tensor  # (N,) bool: a fist touched the ground in an earlier step of the fall
     head_vz: torch.Tensor  # vertical velocities [m/s]
     trunk_vz: torch.Tensor
     gravity_b: torch.Tensor  # (N, 3) unit gravity in the trunk frame (projected gravity)
@@ -285,6 +332,18 @@ def handoff_target(s: FallState) -> torch.Tensor:
     return poses[(s.side < 0).long()]
 
 
+def leg_spread(s: FallState) -> torch.Tensor:
+    """Sum over hip roll / yaw of (|deviation from the hand-off pose| - SPREAD_FREE)_+^2 [rad^2]."""
+    ids = [spec.ALL_JOINT_NAMES.index(n) for n in SPREAD_JOINTS]
+    return ((s.q[:, ids] - handoff_target(s)[:, ids]).abs() - SPREAD_FREE).clamp_min(0.0).square().sum(dim=-1)
+
+
+def early_contact(s: FallState) -> torch.Tensor:
+    """Head, trunk, upper arms or legs touch while no fist has touched yet (a fist in the same step is too late)."""
+    f = s.force
+    return ~s.fists_before & _on(f["head"] + f["trunk"] + f["arms"] + f["legs"])
+
+
 def pose_error(s: FallState) -> torch.Tensor:
     """Mean squared error to the hand-off pose over the actuated (non-head) joints [rad^2]."""
     head = len(spec.HEAD_JOINT_NAMES)
@@ -314,6 +373,9 @@ def terms(s: FallState) -> dict[str, torch.Tensor]:
         "head_descent": (-s.head_vz).clamp_min(0.0).square() * torch.exp(-s.head_h / 0.25),
         "trunk_descent": (-s.trunk_vz).clamp_min(0.0).square() * torch.exp(-(s.trunk_h - 0.1).clamp_min(0.0) / 0.2),
         "fist_descent": ((-s.fist_vz).clamp_min(0.0).square() * torch.exp(-(s.fist_h - FIST_TOUCH_H).clamp_min(0.0) / 0.05)).sum(-1),
+        "early_contact": early_contact(s).float(),
+        "foot_lift": (s.foot_h - FOOT_FREE).clamp_min(0.0).sum(dim=-1),
+        "leg_spread": leg_spread(s),
         "facing": turned,
     }
 
@@ -338,7 +400,7 @@ HANDOFF_START_PROB = 0.2
 WALK_PROB = 0.5
 WALK_SPEED = (0.2, 0.6)  # m/s along the heading
 SWING_HIP, SWING_KNEE = (-0.4, -0.1), (0.3, 0.7)  # extra flexion of the lifted leg [rad]; ankle keeps the sole flat
-PUSH_SPEED = (0.6, 1.8)  # trunk velocity change of the push [m/s]
+PUSH_SPEED = (0.6, 2.5)  # trunk velocity change of the push [m/s] (eval also 2.5-3.0)
 
 
 def _u(lo: float, hi: float, n: int, device) -> torch.Tensor:
@@ -401,7 +463,9 @@ class OutcomeTracker:
     max_peak    : largest step-mean ground force on any single body but the feet [body weights]
     arm_share   : share of the arms in the ground impulse (feet aside) over LANDING_S after the first touch-down
     fist_speed  : fastest downward speed of a fist tip within 5 cm of touching the ground [m/s]
-    fists_first : the first touch-down (feet aside) was taken mainly by the fists
+    fists_first : no head, trunk, upper-arm or leg contact before the first fist contact (``early_contact``)
+    foot_lift   : highest foot origin above the ground [m] (standing 0.03, kneeling 0.12, sitting 0.08)
+    leg_spread  : largest hip roll / yaw deviation from the hand-off pose [rad]
     support     : fraction of the time after the first touch-down spent supported (``support``)
     upright_end : upright at the last step
     flipped     : turned round by the last step (forward fall chest up / backward fall chest down)
@@ -412,13 +476,15 @@ class OutcomeTracker:
     """
 
     KEYS = ("head_hit", "trunk_hit", "head_peak", "trunk_peak", "impact", "arm_peak", "max_peak", "arm_share",
-            "fist_speed", "fists_first", "support", "upright_end", "flipped", "handoff_end", "pose_rms", "asym_rms")
+            "fist_speed", "fists_first", "foot_lift", "leg_spread", "support", "upright_end", "flipped", "handoff_end",
+            "pose_rms", "asym_rms")
 
     def __init__(self, num_envs: int, device="cpu", dt: float = spec.POLICY_DT):
         z = lambda: torch.zeros(num_envs, device=device)  # noqa: E731
         self.dt = dt
         self.v = {k: z() for k in self.KEYS}
         self.touched = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self.early = torch.zeros(num_envs, dtype=torch.bool, device=device)  # an early_contact happened
         self.after, self.supported = z(), z()  # steps since the first touch-down / of them supported
         self.arm_imp, self.all_imp = z(), z()  # landing impulse through the arms / all but the feet [N s]
         self.end = torch.zeros(num_envs, len(spec.ALL_JOINT_NAMES) + 5, device=device)  # q, trunk_h, gravity_b, side
@@ -431,7 +497,8 @@ class OutcomeTracker:
         live = torch.ones_like(self.touched) if live is None else live
         fists = f["fist_l"] + f["fist_r"]
         first = live & ~self.touched & _on(fists + f["head"] + f["trunk"] + f["arms"] + f["legs"])
-        biggest = torch.stack([f[g] for g in ("head", "trunk", "arms", "legs")], dim=-1).amax(dim=-1)
+        early = self.early | early_contact(s)
+        spread = [spec.ALL_JOINT_NAMES.index(n) for n in SPREAD_JOINTS]
         touched = self.touched | first
         after = self.after + touched.float()
         supported = self.supported + touched.float() * (support(s) > 0).float()
@@ -449,7 +516,9 @@ class OutcomeTracker:
             "max_peak": torch.maximum(v["max_peak"], s.body_force[:, self.other_ids].amax(dim=-1) / WEIGHT),
             "arm_share": arm_imp / all_imp.clamp_min(1e-6),
             "fist_speed": torch.maximum(v["fist_speed"], ((-s.fist_vz) * (s.fist_h < FIST_TOUCH_H + 0.05)).amax(dim=-1)),
-            "fists_first": torch.where(first, (fists >= biggest).float(), v["fists_first"]),
+            "fists_first": 1.0 - early.float(),
+            "foot_lift": torch.maximum(v["foot_lift"], s.foot_h.amax(dim=-1)),
+            "leg_spread": torch.maximum(v["leg_spread"], (s.q[:, spread] - handoff_target(s)[:, spread]).abs().amax(dim=-1)),
             "support": supported / after.clamp_min(1.0),
             "upright_end": upright(s).float(),
             "flipped": (s.facing * s.chest_z > 0.25).float(),
@@ -464,6 +533,7 @@ class OutcomeTracker:
         end = torch.cat((s.q, s.trunk_h.unsqueeze(-1), s.gravity_b, s.side.unsqueeze(-1)), dim=-1)
         self.end.copy_(torch.where(live.unsqueeze(-1), end, self.end))
         self.touched |= live & first
+        self.early |= live & early
 
     def episodes(self, ids: torch.Tensor, direction: torch.Tensor | None = None) -> list[dict]:
         out = []
@@ -484,6 +554,7 @@ class OutcomeTracker:
         for buf in (self.after, self.supported, self.arm_imp, self.all_imp):
             buf[ids] = 0.0
         self.touched[ids] = False
+        self.early[ids] = False
 
     def close(self, ids: torch.Tensor, direction: torch.Tensor | None = None) -> list[dict]:
         """Outcome dicts of the episodes of ``ids``, then clear them for the next episode."""
@@ -505,15 +576,18 @@ def summarize(episodes: list[dict]) -> dict:
     return out
 
 
-SCORE_KEYS = ("head_hit", "handoff_end", "trunk_hit", "impact", "arm_peak", "arm_share", "fist_speed", "pose_rms", "asym_rms")
+SCORE_KEYS = ("head_hit", "handoff_end", "fists_first", "trunk_hit", "impact", "arm_peak", "arm_share", "fist_speed",
+              "foot_lift", "leg_spread", "pose_rms", "asym_rms")
 IMPACT_SCORE = 0.5  # score per unit of the impact outcome
 
 
 def score(summary: dict) -> float:
     """One number to rank checkpoints (higher is better): the head first, then ending clean in the
-    hand-off pose, chest / back contact, the impact and the distance to the hand-off pose."""
+    hand-off pose, the fists landing first, chest / back contact, the impact and the distance to the
+    hand-off pose."""
     s = summary
-    return s["handoff_end"] - 3.0 * s["head_hit"] - s["trunk_hit"] - IMPACT_SCORE * s["impact"] - s["pose_rms"]
+    return (s["handoff_end"] + s["fists_first"] - 3.0 * s["head_hit"] - s["trunk_hit"] - IMPACT_SCORE * s["impact"]
+            - s["pose_rms"])
 
 
 def end_poses(episodes: list[dict]) -> dict:

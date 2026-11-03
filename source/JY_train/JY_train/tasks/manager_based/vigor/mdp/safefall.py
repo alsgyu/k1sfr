@@ -28,6 +28,7 @@ class _Ids:
         self.bodies = sensor.find_bodies(sf.CONTACT_BODIES, preserve_order=True)[0]
         self.head = robot.find_bodies(sf.HEAD_BODY)[0][0]
         self.hands = robot.find_bodies(sf.HAND_BODIES, preserve_order=True)[0]
+        self.feet = robot.find_bodies(sf.FOOT_BODIES, preserve_order=True)[0]
         self.joints = robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]
 
 
@@ -51,14 +52,21 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
     pos, vel = robot.data.body_pos_w, robot.data.body_lin_vel_w
     fist_pos, fist_vel = sf.fist_tips(pos[:, ids.hands], robot.data.body_quat_w[:, ids.hands], vel[:, ids.hands],
                                       robot.data.body_ang_vel_w[:, ids.hands])
+    _start_buffers(env)
+    force = {g: peak[:, i].sum(dim=-1) for g, i in ids.groups.items()}
+    fists_before = env.safefall_fist_down.clone()
+    fist_on = torch.maximum(force["fist_l"], force["fist_r"]) > sf.CONTACT_THRESHOLD
+    env.safefall_fist_down |= env.safefall_triggered & fist_on
     state = sf.FallState(
-        force={g: peak[:, i].sum(dim=-1) for g, i in ids.groups.items()},
+        force=force,
         body_force=history[:, :, ids.bodies].mean(dim=1),
         head_h=pos[:, ids.head, 2] - ground,
         trunk_h=robot.data.root_pos_w[:, 2] - ground,
         hand_h=pos[:, ids.hands, 2].min(dim=-1).values - ground,
         fist_h=fist_pos[..., 2] - ground.unsqueeze(-1),
         fist_vz=fist_vel[..., 2],
+        foot_h=pos[:, ids.feet, 2] - ground.unsqueeze(-1),
+        fists_before=fists_before,
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
         gravity_b=robot.data.projected_gravity_b,
@@ -89,6 +97,11 @@ def safefall_term(env: ManagerBasedRLEnv, name: str) -> torch.Tensor:
     return _guarded(env, env._safefall_cache[2][name])
 
 
+def safefall_residual(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """safefall_math.residual of the policy's actions (legs weighted RESIDUAL_LEGS)."""
+    return _guarded(env, sf.residual(env.action_manager.action))
+
+
 def guarded_reward(env: ManagerBasedRLEnv, term: str) -> torch.Tensor:
     """The ``isaaclab.envs.mdp`` reward ``term`` (by name: cfg params go through hydra as strings) with
     blown-up envs and non-finite values zeroed."""
@@ -115,6 +128,12 @@ def fall_facing(env: ManagerBasedEnv) -> torch.Tensor:
     return fall_state(env).facing.unsqueeze(-1)
 
 
+def fall_time(env: ManagerBasedEnv) -> torch.Tensor:
+    """Deployable: time since the fall detector handed over [s], up to FALL_TIME_MAX (the legs' reflex follows it)."""
+    _start_buffers(env)
+    return env.safefall_fall_time.clamp_max(sf.FALL_TIME_MAX).unsqueeze(-1)
+
+
 def fall_triggered(env: ManagerBasedEnv) -> torch.Tensor:
     """Privileged: 1 once the fall detector has handed over to the policy."""
     _start_buffers(env)
@@ -131,6 +150,8 @@ def _start_buffers(env: ManagerBasedEnv):
         env.safefall_hold = torch.zeros(n, len(spec.ACTION_JOINT_NAMES), device=env.device)
         env.safefall_side = torch.ones(n, device=env.device)  # latched reflex pose: +1 front, -1 back
         env.safefall_joint_bias = torch.zeros(n, len(spec.ALL_JOINT_NAMES), device=env.device)  # encoder offsets
+        env.safefall_fall_time = torch.zeros(n, device=env.device)  # since the trigger [s]
+        env.safefall_fist_down = torch.zeros(n, dtype=torch.bool, device=env.device)  # a fist touched since the trigger
 
 
 def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tensor:
@@ -142,6 +163,7 @@ def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tenso
     facing = sf.facing_from_gravity(gravity_b)
     env.safefall_facing[new] = facing[new]
     env.safefall_side[new] = torch.where(facing[new] >= 0.0, 1.0, -1.0)
+    env.safefall_fall_time[:] = torch.where(env.safefall_triggered, env.safefall_fall_time + env.step_dt, 0.0)
     env.safefall_triggered |= new
     env.safefall_side[:] = sf.update_side(env.safefall_side, gravity_b)
     return env.safefall_triggered
@@ -213,6 +235,8 @@ def reset_to_fall_start(
     env.safefall_direction[env_ids] = st["direction"]
     env.safefall_facing[env_ids] = st["facing"]
     env.safefall_triggered[env_ids] = on  # hand-off starts are the policy's from the first step
+    env.safefall_fall_time[env_ids] = 0.0
+    env.safefall_fist_down[env_ids] = on  # resting on the fists already
     env.safefall_side[env_ids] = 1.0 - 2.0 * st["handoff"].clamp_min(0).float()  # falls: set at the trigger
     env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 

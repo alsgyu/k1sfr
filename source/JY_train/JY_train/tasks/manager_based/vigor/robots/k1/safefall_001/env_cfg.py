@@ -97,6 +97,7 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5), clip=JOINT_VEL_CLIP,
                             scale=JOINT_VEL_SCALE, history_length=HISTORY)
         last_action = ObsTerm(func=mdp.last_action, history_length=HISTORY)
+        fall_time = ObsTerm(func=mdp.fall_time, history_length=HISTORY)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -109,6 +110,7 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, clip=JOINT_VEL_CLIP, scale=JOINT_VEL_SCALE)
         last_action = ObsTerm(func=mdp.last_action)
+        fall_time = ObsTerm(func=mdp.fall_time)
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=LIN_VEL_CLIP)
         heights = ObsTerm(func=mdp.body_heights)
         contact_forces = ObsTerm(func=mdp.contact_force_groups, clip=(0.0, CONTACT_CLIP))
@@ -198,6 +200,9 @@ class RewardsCfg:
     head_descent = _sf("head_descent")
     trunk_descent = _sf("trunk_descent")
     fist_descent = _sf("fist_descent")
+    early_contact = _sf("early_contact")
+    foot_lift = _sf("foot_lift")
+    leg_spread = _sf("leg_spread")
     facing = _sf("facing")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG), guarded against blow-ups
     action_rate = _reg("action_rate_l2", -0.01)
@@ -205,7 +210,7 @@ class RewardsCfg:
     joint_vel = _reg("joint_vel_l2", -1.0e-4)
     joint_acc = _reg("joint_acc_l2", -2.5e-7)
     torque = _reg("joint_torques_l2", -1.0e-5)
-    residual = _reg("action_l2", sf.RESIDUAL_WEIGHT)
+    residual = RewTerm(func=mdp.safefall_residual, weight=sf.RESIDUAL_WEIGHT)
 
 
 @configclass

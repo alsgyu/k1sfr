@@ -41,6 +41,9 @@ the K1 could not follow inside a fall ("arms up, face first"). The reward is wri
 | `trunk_contact` | -5 | force on the chest or back (trunk tilted past 70 deg; less tilted, only the pelvis can touch: sitting) |
 | `head_descent` / `trunk_descent` | -1 / -0.5 | falling fast close to the ground |
 | `fist_descent` | -2 | fist tips (0.2 m out along the hand link) moving down within a few cm of the ground, (m/s)^2 |
+| `early_contact` | -30 | head, trunk, upper arms or legs on the ground before any fist has touched (the fists land first) |
+| `foot_lift` | -10 | per m of foot origin above 0.15 m (standing 0.03, kneeling 0.12, sitting 0.08): feet stay down |
+| `leg_spread` | -10 | hip roll / yaw more than 0.1 rad from the hand-off pose, squared: no spread or twisted legs |
 | `facing` | -5 | turned round mid-fall (forward fall chest up, backward chest down), scaled by cos of the fall direction; also voids `support` and `handoff_pose` |
 | `upright` | +3 | still standing (not falling stays the best outcome) |
 
@@ -66,16 +69,29 @@ back contact 13 / 8 / 11 %, `handoff_end` 0.71 / 0.91 / 0.74, `arm_peak` 3.0 / 2
 `arm_share` 0.76 / 0.73 / 0.74, fist speed at touch-down about 3.5 / 3.4 / 3.1 m/s, head contact 4.5 / 5.7
 / 6.7 % (mostly backward falls). The fist-plank reward before it: `arm_share` 0.99.
 
+Fists first, calm legs (`early_contact`, `foot_lift`, `leg_spread`, the leg blend of the reflex, legs x5 in
+`residual`, pushes up to 2.5 m/s). MuJoCo, 2000 iterations, seeds 0 and 1, 256 falls each, before -> after
+(before: the reward above, trained on pushes up to 1.8 m/s): fists strictly first 62-88 % -> 94-100 % by
+direction; hip yaw during the fall 0.34-0.38 -> 0.12-0.19 rad; feet lifted 0.26-0.39 -> 0.16-0.27 m; at
+0.6-1.8 m/s head contact 5.7 -> 2.0 %, chest / back 7.8 -> 6.1 %, impact 0.81 -> 0.71, `arm_peak` 2.8 ->
+2.5, `arm_share` 0.73 -> 0.69, `handoff_end` 0.91 -> 0.78. Forward falls land on the fists, the elbows
+bend from -0.8 to -1.5 rad while the trunk comes down, and the knees touch ~0.25 s after the fists.
+Backward falls reach the sitting pose less often (`handoff_end` 0.98 -> 0.45 at 0.6-1.8 m/s, 0.57-0.67
+at 1.8-2.5): to put the fists down before the hips the policy keeps the knees straight and then rolls
+back with the legs up. Stronger pushes, after (2 seeds) / before (1 seed): 1.8-2.5 m/s head 3.1 / 1.6
+%, chest / back 5.9 / 7.0 %, impact 0.85 / 1.07, `arm_peak` 3.0 / 3.5; 2.5-3.0 m/s (beyond training)
+head 7.9 / 10.2 %, chest / back 10.8 / 18.8 %, impact 1.10 / 1.33, `arm_peak` 3.5 / 3.9.
+
 Episodes follow the robot's fall handling: the K1 stands on the ground (half of the episodes walking:
-0.2-0.6 m/s forward with one leg lifted mid-swing) and is pushed (0.6-1.8 m/s on the trunk; 45 %
+0.2-0.6 m/s forward with one leg lifted mid-swing) and is pushed (0.6-2.5 m/s on the trunk; 45 %
 forward, 20 % backward, 35 % sideways, +-45 deg). Until the IMU tilt reaches 20 deg (the fall detector,
 `TRIGGER_TILT_DEG`) the start pose is held and the policy's actions are ignored and unrewarded - on the
 robot the walking policy runs until then; from the trigger on the policy acts (MuJoCo: every push
 triggers, after 0.2-0.5 s). The facing of the fall is taken from the tilt direction at the trigger. 20 %
 of the episodes instead start resting in a hand-off pose (direction `handoff`) so the policy learns to
 hold the target poses. Eval scripts measure falls only (`HANDOFF_START_PROB = 0`); training
-`Metrics/monitor/*` include the hand-off starts. The actor sees only IMU + joints + last action (3-step
-history), so it deploys without distillation; the critic also gets velocities, heights, contact forces,
+`Metrics/monitor/*` include the hand-off starts. The actor sees only IMU + joints + last action + time
+since the trigger (3-step history), so it deploys without distillation; the critic also gets velocities, heights, contact forces,
 the fall direction and whether the trigger has fired.
 
 Domain randomisation, matched to the team's walking task (`scratch_symmetry` walk_001): static / dynamic
@@ -96,13 +112,19 @@ Actions are offsets from a reflex target, not from the walking stance (`ReflexJo
 `safefall_math.reflex_targets`): the hand-off pose of a latched side, set from the tilt direction at the
 trigger and switched only once the chest clearly faces the other way (|chest_z| > 0.25, `update_side`).
 Choosing by the sign of chest_z every step flipped the legs between the poses whenever a side fall rolled
-through chest-sideways, and the policy flailed them; `residual` (-0.01 x sum of squared actions) keeps the
-policy on the reflex unless the landing needs otherwise. Zero action therefore reaches for the ground and
-ends in the hand-off pose; the policy learns the landing (when the elbows and knees give) and balance on
-top. Measured from the stance, holding a plank took actions of -3.4 on shoulder or hip pitch, and the
-policy left it within 0.5 s even when the episode started in it. On the robot the same reflex function of
-the IMU's projected gravity must be added to the policy output, and the observations scaled as in training
-(angular velocity x 0.25, joint velocity x 0.05) (`--passive` in the eval scripts is the reflex alone).
+through chest-sideways, and the policy flailed them; `residual` (-0.01 x sum of squared actions, legs x5)
+keeps the policy on the reflex unless the landing needs otherwise. The arms go to the pose at once (reach
+for the ground); the legs blend there from the joint targets held at the trigger, smoothstep over 0.5 s
+(`leg_blend`), starting 0.15 s after the trigger in front (about when the fists touch: fists first, then
+the knees come down as the arms give) and at once behind (squat, so the hips come down near the heels).
+Jumping the legs to the pose at the trigger folded them in the air: feet 0.25-0.4 m up, and the knees or
+hips landed before the fists in 44-100 % of the reflex-only falls (6-9 % with the blend). Zero action
+therefore reaches for the ground and ends in the hand-off pose; the policy learns the landing (when the
+elbows and knees give) and balance on top. Measured from the stance, holding a plank took actions of -3.4
+on shoulder or hip pitch, and the policy left it within 0.5 s even when the episode started in it. On the
+robot the same reflex must be added to the policy output -- latched side from the IMU's projected gravity,
+joint targets at the switch, time since the switch -- and the observations scaled as in training (angular
+velocity x 0.25, joint velocity x 0.05) (`--passive` in the eval scripts is the reflex alone).
 
 Left-right symmetry augmentation (`safefall_symmetry.py`, rsl_rl `symmetry_cfg`): PPO also trains on
 the mirror image of every sample, so a straight forward fall gets a symmetric landing. Without it the
@@ -113,8 +135,8 @@ fixed observation scales instead of empirical normalisation.
 
 ```bash
 # laptop, MuJoCo (same URDF, gains, starts and reward), ~25 min for 2000 iterations
-python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 2000 --out ~/vigor_work/safefall_mj/run16s1
-python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run16s1/model_1999.pt --render rollouts.png
+python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 2000 --out ~/vigor_work/safefall_mj/run17s1
+python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run17s1/model_1999.pt --render rollouts.png
 python scripts/vigor/safefall_mujoco.py eval --passive
 # GPU, Isaac
 python scripts/rsl_rl/train.py --task Booster-K1-SafeFall-Flat-v0 --headless --run_name share --max_iterations 6000
@@ -127,14 +149,16 @@ and their peak forces (body weights); `impact` (the `impact` term integrated ove
 (largest step-mean ground force through one arm, body weights); `max_peak` (same for any single body but
 the feet); `arm_share` (the arms' share of the ground impulse, feet aside, in the 0.5 s after the first
 touch-down); `fist_speed` (fastest downward speed of a fist tip within 5 cm of touching, m/s);
-`fists_first`; `support` (fraction of the time after touch-down spent supported);
+`fists_first` (no head, trunk, upper-arm or leg contact before the first fist contact); `foot_lift`
+(highest foot origin, m); `leg_spread` (largest hip roll / yaw deviation from the hand-off pose, rad);
+`support` (fraction of the time after touch-down spent supported);
 `upright_end`; `flipped` (turned round by the end: forward fall chest up / backward fall chest down);
 `handoff_end` (supported on both fists, head, chest, back and upper arms clear, at the last step);
 `pose_rms` (RMS joint error to the hand-off pose at the last step, rad); `asym_rms` (RMS left-right
 asymmetry of the end pose, rad); with `--release_after` also `release_*` for the lowering phase. Which
 checkpoint is best: `eval_safefall.py --sweep 500` evaluates every 500th checkpoint of the run on
-identical falls and ranks them by `safefall_math.score` (handoff_end - 3 head_hit - trunk_hit - 0.5 impact
-- pose_rms).
+identical falls and ranks them by `safefall_math.score` (handoff_end + fists_first - 3 head_hit -
+trunk_hit - 0.5 impact - pose_rms).
 
 Hand-off poses (`safefall_math.HANDOFF_POSES`): symmetric PD targets the K1 rests in on several contacts
 -- front: fists 0.21, knees 0.18, toes 0.14 body weights each; back: hips 0.30, heels 0.11, fists 0.09 --
