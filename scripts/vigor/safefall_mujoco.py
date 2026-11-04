@@ -95,6 +95,7 @@ class SafeFallEnv:
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
         self.m = build_model(mesh_dir)
+        self.floor = self.m.geom("floor").id
         self.num_envs, self.device, self.cfg = num_envs, "cpu", {}
         self.datas = [mujoco.MjData(self.m) for _ in range(num_envs)]
         self.pool = ThreadPoolExecutor(threads or os.cpu_count())
@@ -133,7 +134,7 @@ class SafeFallEnv:
         self.facing = np.zeros(n)
         self.triggered = np.ones(n, dtype=bool)  # the fall detector has handed over (set per episode at reset)
         self.fall_time = np.zeros(n)  # since the trigger [s]
-        self.fist_down = np.zeros(n, dtype=bool)  # a fist has touched since the trigger
+        self.fist_down = np.zeros((n, 2), dtype=bool)  # the left / right fist has touched since the trigger
         self.hold = np.tile(self.default, (n, 1))  # start pose, held until the trigger
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
@@ -199,7 +200,7 @@ class SafeFallEnv:
             self.facing[i] = float(st["facing"][k])
             self.triggered[i] = bool(st["handoff"][k] >= 0)
             self.fall_time[i] = 0.0
-            self.fist_down[i] = bool(st["handoff"][k] >= 0)  # resting on them already
+            self.fist_down[i] = bool(st["handoff"][k] >= 0)  # resting on them already (both)
             self.hold[i] = q
             self.side[i] = 1.0 - 2.0 * max(int(st["handoff"][k]), 0)  # falls: set at the trigger
             if st["handoff"][k] < 0:
@@ -218,15 +219,26 @@ class SafeFallEnv:
         pos, _ = sf.fist_tips(torch.as_tensor(hand_pos, dtype=torch.float32), torch.as_tensor(hand_quat, dtype=torch.float32))
         return pos.numpy()
 
+    def _ground_forces(self, d: mujoco.MjData, f6: np.ndarray) -> np.ndarray:
+        """Contact force from the floor per body [N] (as the Isaac sensor filtered on the ground): the K1
+        collides with itself, and the bodies' total contact forces counted a fist pressed against the trunk as
+        a chest / back hit (all of the trunk contacts of side falls) and a fist on the thigh as a fist down."""
+        force = np.zeros(self.m.nbody)
+        g1, g2 = d.contact.geom1[: d.ncon], d.contact.geom2[: d.ncon]
+        for j in np.nonzero((g1 == self.floor) | (g2 == self.floor))[0]:
+            mujoco.mj_contactForce(self.m, d, int(j), f6)
+            force[self.m.geom_bodyid[g2[j] if g1[j] == self.floor else g1[j]]] += np.linalg.norm(f6[:3])
+        return force
+
     def _substeps(self, chunk):
+        f6 = np.zeros(6)
         for i in chunk:
             d = self.datas[i]
             peak, total = np.zeros(self.m.nbody), np.zeros(self.m.nbody)
             for k in range(DECIMATION):
                 d.ctrl[:] = self.targets[i] if k >= self.delay[i] else self.prev_targets[i]
                 mujoco.mj_step(self.m, d)
-                mujoco.mj_rnePostConstraint(self.m, d)
-                force = np.linalg.norm(d.cfrc_ext[:, 3:], axis=1)
+                force = self._ground_forces(d, f6)
                 np.maximum(peak, force, out=peak)
                 total += force
             self.peak[i], self.mean_force[i] = peak, total / DECIMATION
@@ -297,13 +309,13 @@ class SafeFallEnv:
         widths = sf.arm_width(*(torch.as_tensor(x, dtype=torch.float32) for x in (qpos[:, :3], qpos[:, 3:7], hand_pos, fist_pos)))
         foot_z = np.stack([d.xpos[self.foot_bodies, 2] for d in self.datas])
         f = {g: torch.as_tensor(self.peak[:, b].sum(1), dtype=torch.float32) for g, b in self.body.items()}
-        fists_before = self.fist_down.copy()
-        self.fist_down |= self.triggered & (sf._on(f["fist_l"]) | sf._on(f["fist_r"])).numpy()
+        fist_touched = self.fist_down.copy()
+        self.fist_down |= self.triggered[:, None] & torch.stack([sf._on(f["fist_l"]), sf._on(f["fist_r"])], dim=-1).numpy()
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, body_force=T(self.mean_force[:, self.contact_bodies]), head_h=T(head_z), trunk_h=T(trunk_z),
                              hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt), foot_h=T(foot_z),
                              arm_width=widths,
-                             fists_before=torch.as_tensor(fists_before),
+                             fist_touched=torch.as_tensor(fist_touched),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt),
                              trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]),
                              facing=T(self.facing), side=T(self.side))
@@ -479,7 +491,7 @@ def main():
     p.add_argument("--envs", type=int, default=64)
     p.add_argument("--iters", type=int, default=800)
     p.add_argument("--out", default=os.path.expanduser("~/vigor_work/safefall_mj"))
-    p.add_argument("--ckpt", default=None)
+    p.add_argument("--ckpt", default=None, help="eval: the policy; train: continue from it")
     p.add_argument("--passive", action="store_true", help="eval zero actions: the reflex alone (reach into the hand-off pose)")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
@@ -498,6 +510,8 @@ def main():
     env.noise = a.mode == "train"
     runner = OnPolicyRunner(env, train_cfg(a.iters), log_dir=a.out if a.mode == "train" else None, device="cpu")
     if a.mode == "train":
+        if a.ckpt:  # fine-tune: continue from a checkpoint (as train.py --resume on the GPU)
+            runner.load(a.ckpt)
         runner.learn(num_learning_iterations=a.iters, init_at_random_ep_len=True)
         return
     policy = None

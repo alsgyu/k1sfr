@@ -188,7 +188,7 @@ def test_safefall_math():
         grav = torch.tensor([-chest_z, 0.0, -math.sqrt(1 - chest_z**2)]).expand(n, 3)
         return sf.FallState(force=f, body_force=per_body, head_h=z + head_h, trunk_h=z + trunk_h, hand_h=z + 0.02,
                             fist_h=torch.full((n, 2), fist_h), fist_vz=torch.full((n, 2), fist_vz),
-                            foot_h=torch.full((n, 2), foot_h), fists_before=torch.full((n,), fists_before),
+                            foot_h=torch.full((n, 2), foot_h), fist_touched=torch.full((n, 2), fists_before),
                             arm_width=torch.tensor(widths).expand(n, 2), head_vz=z,
                             trunk_vz=z, gravity_b=grav, q=q.float().expand(n, -1), facing=z + facing, side=z + side)
 
@@ -246,8 +246,18 @@ def test_safefall_math():
     assert (sf.terms(state(**kneel))["arm_width"] == 0).all()
     assert torch.allclose(sf.terms(state(**kneel | {"widths": (0.32, 0.48)}))["arm_width"], torch.full((n,), 0.15**2))
     assert (sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["back"]}))["arm_width"] == 0).all()
-    back_wide = sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["front"]}))["arm_width"]  # per side
-    assert torch.allclose(back_wide, torch.full((n,), 0.02**2 + 0.07**2))
+    back_narrow = sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["front"]}))["arm_width"]  # per side
+    assert torch.allclose(back_narrow, torch.full((n,), (sf.ARM_WIDTH_MIN["back"][1] - 0.33) ** 2))  # fists 0.33 < 0.35
+    together = sf.terms(state(**sit | {"facing": -1.0, "widths": (0.30, 0.21)}))["arm_width"]  # fists behind the back
+    assert torch.allclose(together, torch.full((n,), 0.14**2))
+    # a fist that touched lifted off the ground again (feeling about for a spot) costs; resting on it does not
+    assert (sf.terms(state(**kneel))["fist_relift"] == 0).all()
+    lifted = kneel | {"fist_l": 0.0, "fist_r": 0.0, "fist_h": 0.2}
+    assert torch.allclose(sf.terms(state(**lifted))["fist_relift"], torch.full((n,), 2.0))
+    assert (sf.terms(state(**lifted | {"fists_before": False}))["fist_relift"] == 0).all()  # still reaching down
+    half = lifted | {"fist_h": sf.RELIFT_H + 0.5 * sf.RELIFT_RAMP}
+    assert torch.allclose(sf.terms(state(**half))["fist_relift"], torch.full((n,), 1.0))
+    assert torch.allclose(sf.terms(state(**half | {"fist_l": 0.2}))["fist_relift"], torch.full((n,), 0.5))  # left still on
     assert (sf.terms(state(**kneel))["early_contact"] == 0).all() and (sf.terms(state(**kneel))["foot_lift"] == 0).all()
     assert torch.allclose(sf.terms(state(**kneel | {"foot_h": 0.35}))["foot_lift"], torch.full((n,), 0.4))
     assert (sf.terms(state(**kneel | {"foot_h": 0.35, "fists_before": False}))["foot_lift"] == 0).all()  # in the air: free

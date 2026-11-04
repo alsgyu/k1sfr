@@ -32,11 +32,34 @@ class _Ids:
         self.joints = robot.find_joints(spec.ALL_JOINT_NAMES, preserve_order=True)[0]
 
 
+# the flat terrain's collider (TerrainImporterCfg prim_path "/World/ground", terrain_type "plane"; the path
+# Isaac Lab's own contact sensor test filters on)
+GROUND_COLLIDER = "/World/ground/terrain/GroundPlane/CollisionPlane"
+
+
+def _ground_forces(env: ManagerBasedEnv, sensor: ContactSensor) -> torch.Tensor:
+    """(N, substeps, bodies) normal force from the ground on each sensor body [N].  Self-contacts left out:
+    the K1 collides with itself, and the net forces counted a fist pressed against the trunk as a chest /
+    back hit (MuJoCo: all of the trunk contacts of side falls) and a fist on the thigh as a fist down."""
+    matrix = sensor.data.force_matrix_w_history
+    if matrix is None:
+        raise RuntimeError("SafeFall needs the contact sensor filtered on the ground (filter_prim_paths_expr=[GROUND_COLLIDER])")
+    ground = matrix.sum(dim=3).norm(dim=-1)
+    if not getattr(env, "_safefall_ground_ok", False):  # a filter matching no collider would read zero, silently
+        total = sensor.data.net_forces_w_history.norm(dim=-1).sum()
+        if total > 10.0 * sf.WEIGHT:
+            if ground.sum() < 0.05 * total:
+                raise RuntimeError(f"SafeFall: no ground forces through {GROUND_COLLIDER} while the net contact forces "
+                                   f"sum to {float(total):.0f} N: the ground collider prim path is wrong")
+            env._safefall_ground_ok = True
+    return ground
+
+
 def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str = "contact_forces") -> sf.FallState:
     """FallState of every env, computed once per env step (all reward terms and the monitor share it).
 
-    Contact forces are the peak (contact detection) and the mean (impulse / step, the impact) over the sensor
-    history, which spans the policy step's physics substeps."""
+    Contact forces are ground contacts only, the peak (contact detection) and the mean (impulse / step, the
+    impact) over the sensor history, which spans the policy step's physics substeps."""
     cache = getattr(env, "_safefall_cache", None)
     step = getattr(env, "common_step_counter", 0)
     if cache is not None and cache[0] == step:
@@ -46,7 +69,7 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
     if not hasattr(env, "_safefall_ids"):
         env._safefall_ids = _Ids(robot, sensor)
     ids = env._safefall_ids
-    history = sensor.data.net_forces_w_history.norm(dim=-1)  # (N, substeps, bodies)
+    history = _ground_forces(env, sensor)  # (N, substeps, bodies)
     peak = history.amax(dim=1)
     ground = env.scene.env_origins[:, 2]  # flat ground
     pos, vel = robot.data.body_pos_w, robot.data.body_lin_vel_w
@@ -54,9 +77,9 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
                                       robot.data.body_ang_vel_w[:, ids.hands])
     _start_buffers(env)
     force = {g: peak[:, i].sum(dim=-1) for g, i in ids.groups.items()}
-    fists_before = env.safefall_fist_down.clone()
-    fist_on = torch.maximum(force["fist_l"], force["fist_r"]) > sf.CONTACT_THRESHOLD
-    env.safefall_fist_down |= env.safefall_triggered & fist_on
+    fist_touched = env.safefall_fist_down.clone()
+    fist_on = torch.stack([force["fist_l"], force["fist_r"]], dim=-1) > sf.CONTACT_THRESHOLD
+    env.safefall_fist_down |= env.safefall_triggered.unsqueeze(-1) & fist_on
     state = sf.FallState(
         force=force,
         body_force=history[:, :, ids.bodies].mean(dim=1),
@@ -67,7 +90,7 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         fist_vz=fist_vel[..., 2],
         foot_h=pos[:, ids.feet, 2] - ground.unsqueeze(-1),
         arm_width=sf.arm_width(robot.data.root_pos_w, robot.data.root_quat_w, pos[:, ids.hands], fist_pos),
-        fists_before=fists_before,
+        fist_touched=fist_touched,
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
         gravity_b=robot.data.projected_gravity_b,
@@ -152,7 +175,7 @@ def _start_buffers(env: ManagerBasedEnv):
         env.safefall_side = torch.ones(n, device=env.device)  # latched reflex pose: +1 front, -1 back
         env.safefall_joint_bias = torch.zeros(n, len(spec.ALL_JOINT_NAMES), device=env.device)  # encoder offsets
         env.safefall_fall_time = torch.zeros(n, device=env.device)  # since the trigger [s]
-        env.safefall_fist_down = torch.zeros(n, dtype=torch.bool, device=env.device)  # a fist touched since the trigger
+        env.safefall_fist_down = torch.zeros(n, 2, dtype=torch.bool, device=env.device)  # left / right fist touched since the trigger
 
 
 def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tensor:
@@ -237,7 +260,7 @@ def reset_to_fall_start(
     env.safefall_facing[env_ids] = st["facing"]
     env.safefall_triggered[env_ids] = on  # hand-off starts are the policy's from the first step
     env.safefall_fall_time[env_ids] = 0.0
-    env.safefall_fist_down[env_ids] = on  # resting on the fists already
+    env.safefall_fist_down[env_ids] = on.unsqueeze(-1)  # resting on the fists already
     env.safefall_side[env_ids] = 1.0 - 2.0 * st["handoff"].clamp_min(0).float()  # falls: set at the trigger
     env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 

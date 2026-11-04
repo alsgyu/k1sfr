@@ -39,7 +39,7 @@ RECOVERY_NAMES = {"AAHead_yaw": "Head_Yaw", "Head_pitch": "Head_Pitch",
 # symmetric pose parameters (shoulder pitch, |shoulder roll|, elbow pitch, |elbow yaw| (flexion), hip pitch,
 # |hip roll| (legs apart), knee, ankle pitch) and the trunk pitch the drop starts from
 CHOSEN = {"front": ((-1.18, 1.5, 0.3, 0.47, -1.08, 0.15, 1.71, 0.22), 1.21),
-          "back": ((0.74, 1.52, 0.86, 0.34, -1.56, 0.15, 0.18, -0.59), -0.02)}
+          "back": ((0.88, 1.44, -0.21, 1.23, -1.56, 0.15, 0.18, -0.59), -0.03)}
 RANGES = {  # search: uniform ranges of the parameters above (elbow pitch 0.3 unless given, hip roll 0.15) and the drop pitch
     "front": {"sp": (-2.0, -0.8), "sr": (1.1, 1.57), "ep": (-0.8, 0.9), "ey": (0.1, 1.0), "hp": (-1.8, -0.4), "kp": (1.0, 2.2),
               "ap": (-0.5, 0.34), "pitch": (0.9, 1.6)},
@@ -48,13 +48,21 @@ RANGES = {  # search: uniform ranges of the parameters above (elbow pitch 0.3 un
     # mid-fall, which rolled the K1 back like a ball
     "back": {"sp": (0.4, 0.99), "sr": (1.1, 1.57), "ep": (-0.8, 0.9), "ey": (0.12, 0.7), "hp": (-1.8, -0.8), "kp": (0.11, 0.5),
              "ap": (-0.8, 0.28), "pitch": (-0.7, 0.0)},
+    # back arms only (legs as CHOSEN): fists beside the hips instead of together behind the back
+    "back_arms": {"sp": (0.3, 0.92), "sr": (0.9, 1.57), "ep": (-0.6, 0.6), "ey": (0.6, 1.5), "hp": (-1.56, -1.56),
+                  "kp": (0.18, 0.18), "ap": (-0.59, -0.59), "pitch": (-0.5, 0.0)},
 }
 SUPPORT = {"front": ["Left_Shank", "Right_Shank"], "back": ["Left_Hip_Roll", "Right_Hip_Roll"]}  # besides the fists
 NEVER = sf.CONTACT_GROUPS["head"] + sf.CONTACT_GROUPS["arms"]  # plus the trunk unless it is the pelvis
 PUSHES = [s * np.array(d, dtype=float) for s in (0.3, 0.6) for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0))]
 CORNERS = np.array([[i, j, k] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)])
 TOUCH = 0.03  # body weights: a body counts as a contact of the pose
-FIST_WIDTH_MAX = {"front": 0.30, "back": 0.45}  # m between the fist tips across the trunk (shoulders 0.15 apart)
+FIST_WIDTH_MAX = {"front": 0.30, "back": 0.45}  # m between the fist tips across the trunk (shoulders 0.29 apart)
+# back: fists on the ground beside the hips (hip joints 0.19 apart), as a person sitting down leans on the
+# hands at the sides -- not together behind the back (the first legs-out sit had them 0.21 apart, 0.28 behind)
+FIST_WIDTH_MIN = {"front": None, "back": 0.32}
+FIST_BEHIND = {"front": None, "back": (0.03, 0.18)}  # m behind the hip joints along the heading
+ELBOW_WIDTH_MAX = {"front": None, "back": 0.42}  # elbows (hand_link origins) close to the body, not winged out
 
 
 class Bench:
@@ -98,8 +106,13 @@ class Bench:
         rot = d.xmat[trunk].reshape(3, 3)
         hands = [m.body(b).id for b in sf.HAND_BODIES]
         across = lambda p: (rot.T @ (p - d.xpos[trunk]))[1]  # noqa: E731
-        tips = [across(d.xpos[h] + d.xmat[h].reshape(3, 3) @ np.array(t)) for h, t in zip(hands, sf.FIST_TIPS)]
-        return {"fist_w": float(tips[0] - tips[1]), "elbow_w": float(across(d.xpos[hands[0]]) - across(d.xpos[hands[1]]))}
+        tip_pos = [d.xpos[h] + d.xmat[h].reshape(3, 3) @ np.array(t) for h, t in zip(hands, sf.FIST_TIPS)]
+        tips = [across(p) for p in tip_pos]
+        heading = np.array([rot[0, 0], rot[1, 0], 0.0])
+        hips = np.mean([d.xpos[m.body(f"{s}_Hip_Roll").id] for s in ("Left", "Right")], axis=0)
+        behind = -float(np.mean([(p - hips) @ heading for p in tip_pos]) / max(np.linalg.norm(heading), 1e-6))
+        return {"fist_w": float(tips[0] - tips[1]), "elbow_w": float(across(d.xpos[hands[0]]) - across(d.xpos[hands[1]])),
+                "fist_behind": behind}
 
     def settle(self, q: np.ndarray, pitch: float, seconds: float = 3.0, push: np.ndarray | None = None) -> dict:
         """Drop the pose (trunk pitched about world y, lowest point 1 cm up) and hold it on the PD gains;
@@ -139,7 +152,10 @@ def qualifies(r: dict, side: str, q: np.ndarray, bench: Bench) -> bool:
     c = contacts(r)
     never = NEVER + ([] if side == "back" and r["pitch"] > -math.radians(sf.PELVIS_TILT_DEG) else ["Trunk"])
     narrow = FIST_WIDTH_MAX[side] is None or r["fist_w"] <= FIST_WIDTH_MAX[side]
-    return (all(b in c for b in sf.HAND_BODIES + SUPPORT[side]) and not any(b in c for b in never) and narrow
+    wide = FIST_WIDTH_MIN[side] is None or r["fist_w"] >= FIST_WIDTH_MIN[side]
+    beside = FIST_BEHIND[side] is None or FIST_BEHIND[side][0] <= r["fist_behind"] <= FIST_BEHIND[side][1]
+    beside &= ELBOW_WIDTH_MAX[side] is None or r["elbow_w"] <= ELBOW_WIDTH_MAX[side]
+    return (all(b in c for b in sf.HAND_BODIES + SUPPORT[side]) and not any(b in c for b in never) and narrow and wide and beside
             and abs(c["left_hand_link"] - c["right_hand_link"]) < 0.05 and r["head_low"] > 0.15 and r["speed"] < 0.05)
 
 
@@ -187,10 +203,11 @@ def root_state(bench: Bench) -> dict:
 
 
 def _search(args) -> list:
-    side, n, seed = args
+    ranges, n, seed = args
+    side = ranges.split("_")[0]
     bench, rng, out = Bench(), np.random.default_rng(seed), []
     for _ in range(n):
-        p = {k: rng.uniform(*v) for k, v in RANGES[side].items()}
+        p = {k: rng.uniform(*v) for k, v in RANGES[ranges].items()}
         params = (p["sp"], p["sr"], p.get("ep", 0.3), p["ey"], p["hp"], 0.15, p["kp"], p["ap"])
         r = bench.settle(pose(*params), p["pitch"], 2.5)
         if qualifies(r, side, pose(*params), bench):
@@ -201,7 +218,7 @@ def _search(args) -> list:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["search", "poses", "check"])
-    p.add_argument("side", nargs="?", choices=["front", "back"], default="front")
+    p.add_argument("side", nargs="?", choices=["front", "back", "back_arms"], default="front", help="search: range set")
     p.add_argument("--n", type=int, default=2000, help="search: candidates")
     p.add_argument("--out", default=None, help="check: JSON for the get-up team")
     p.add_argument("--render", default=None, help="check: PNG of both poses")
@@ -219,6 +236,7 @@ def main():
             print(f"  sum (F/W)^2 {load:.3f}  pushes {n}/{len(PUSHES)}  {tuple(round(x, 2) for x in params)} drop pitch {pitch:.2f}\n"
                   f"     head {r['head_low']:.2f} m, trunk {r['trunk_h']:.2f} m, pitch {math.degrees(r['pitch']):.0f} deg, "
                   f"arm torque {r['tau'][2:10].max():.1f} Nm, fists {r['fist_w']:.2f} / elbows {r['elbow_w']:.2f} m apart, "
+                  f"{r['fist_behind']:.2f} m behind the hips, "
                   f"contacts {contacts(r)}")
         return
 
