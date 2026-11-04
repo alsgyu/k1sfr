@@ -66,6 +66,7 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         fist_h=fist_pos[..., 2] - ground.unsqueeze(-1),
         fist_vz=fist_vel[..., 2],
         foot_h=pos[:, ids.feet, 2] - ground.unsqueeze(-1),
+        arm_width=sf.arm_width(robot.data.root_pos_w, robot.data.root_quat_w, pos[:, ids.hands], fist_pos),
         fists_before=fists_before,
         head_vz=vel[:, ids.head, 2],
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
@@ -162,7 +163,7 @@ def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tenso
     new = ~env.safefall_triggered & (-gravity_b[:, 2] < sf.TRIGGER_COS)
     facing = sf.facing_from_gravity(gravity_b)
     env.safefall_facing[new] = facing[new]
-    env.safefall_side[new] = torch.where(facing[new] >= 0.0, 1.0, -1.0)
+    env.safefall_side[new] = sf.initial_side(facing[new])
     env.safefall_fall_time[:] = torch.where(env.safefall_triggered, env.safefall_fall_time + env.step_dt, 0.0)
     env.safefall_triggered |= new
     env.safefall_side[:] = sf.update_side(env.safefall_side, gravity_b)

@@ -41,8 +41,9 @@ the K1 could not follow inside a fall ("arms up, face first"). The reward is wri
 | `trunk_contact` | -5 | force on the chest or back (trunk tilted past 70 deg; less tilted, only the pelvis can touch: sitting) |
 | `head_descent` / `trunk_descent` | -1 / -0.5 | falling fast close to the ground |
 | `fist_descent` | -2 | fist tips (0.2 m out along the hand link) moving down within a few cm of the ground, (m/s)^2 |
-| `early_contact` | -30 | head, trunk, upper arms or legs on the ground before any fist has touched (the fists land first) |
-| `foot_lift` | -10 | per m of foot origin above 0.15 m (standing 0.03, kneeling 0.12, sitting 0.08): feet stay down |
+| `early_contact` | -30 | head, trunk, upper arms or legs on the ground while no fist has touched, touches now or is within 5 cm of touching (fists first or together) |
+| `arm_width` | -100 | elbows / fists further apart across the trunk than the hand-off pose + 5 cm, squared (no arms flung out) |
+| `foot_lift` | -40 | per m of foot origin above 0.15 m (standing 0.03, kneeling 0.12, sitting 0.08) once a fist has touched: feet stay down after the landing (-10 let backward falls rock back on the hips, legs 30-40 deg up) |
 | `leg_spread` | -10 | hip roll / yaw more than 0.1 rad from the hand-off pose, squared: no spread or twisted legs |
 | `facing` | -5 | turned round mid-fall (forward fall chest up, backward chest down), scaled by cos of the fall direction; also voids `support` and `handoff_pose` |
 | `upright` | +3 | still standing (not falling stays the best outcome) |
@@ -82,6 +83,18 @@ back with the legs up. Stronger pushes, after (2 seeds) / before (1 seed): 1.8-2
 %, chest / back 5.9 / 7.0 %, impact 0.85 / 1.07, `arm_peak` 3.0 / 3.5; 2.5-3.0 m/s (beyond training)
 head 7.9 / 10.2 %, chest / back 10.8 / 18.8 %, impact 1.10 / 1.33, `arm_peak` 3.5 / 3.9.
 
+Sitting down backward, narrower arms in front (legs-out sitting pose, front fists 0.28 m apart in the
+hand-off pose, `arm_width`, `initial_side`, `foot_lift` -40). MuJoCo, 2000 iterations, 3 seeds, 256 falls
+each at 0.6-1.8 m/s, before (the paragraph above, 2 seeds) -> after: backward falls sit down upright with
+the legs out and the fists behind in most falls (the knees no longer straighten to roll back), but some
+still rock back on the hips after landing with the legs up for ~0.3 s before sitting up (feet up to
+0.26 m, 0.19 before); widest fists on the ground in forward falls 0.44 -> 0.38 m; head contact 2 -> 3 %;
+chest / back 6 -> 10 %, mostly side falls (16-30 %: they land on the side of the trunk, then sit up or
+kneel); impact 0.71 -> 0.97. `handoff_end` behind 0.45 -> 0.25 understates the sitting: many falls end
+upright on the fists and heels with the hips a centimetre off the ground. Results vary much by seed in
+MuJoCo (side falls' chest / back 3-51 %); at 1.8-2.5 m/s (2 seeds) head 1.8 %, chest / back 11 %, impact
+1.07; at 2.5-3.0 m/s head 7 %, chest / back 23 %, impact 1.41.
+
 Episodes follow the robot's fall handling: the K1 stands on the ground (half of the episodes walking:
 0.2-0.6 m/s forward with one leg lifted mid-swing) and is pushed (0.6-2.5 m/s on the trunk; 45 %
 forward, 20 % backward, 35 % sideways, +-45 deg). Until the IMU tilt reaches 20 deg (the fall detector,
@@ -110,13 +123,16 @@ the current frame and a zero last action.
 
 Actions are offsets from a reflex target, not from the walking stance (`ReflexJointPositionAction`,
 `safefall_math.reflex_targets`): the hand-off pose of a latched side, set from the tilt direction at the
-trigger and switched only once the chest clearly faces the other way (|chest_z| > 0.25, `update_side`).
+trigger (`initial_side`: sitting only for falls within 60 deg of straight back; side falls caught by sitting
+hit the trunk in 61-67 %, by kneeling in 0 %) and switched only once the chest clearly faces the other way
+(chest_z < -0.5 to front, > 0.25 to back, `update_side`; the sitting pose is upright, chest_z 0.05).
 Choosing by the sign of chest_z every step flipped the legs between the poses whenever a side fall rolled
 through chest-sideways, and the policy flailed them; `residual` (-0.01 x sum of squared actions, legs x5)
 keeps the policy on the reflex unless the landing needs otherwise. The arms go to the pose at once (reach
-for the ground); the legs blend there from the joint targets held at the trigger, smoothstep over 0.5 s
-(`leg_blend`), starting 0.15 s after the trigger in front (about when the fists touch: fists first, then
-the knees come down as the arms give) and at once behind (squat, so the hips come down near the heels).
+for the ground); the legs blend there from the joint targets held at the trigger, smoothstep (`leg_blend`)
+over 0.5 s starting 0.15 s after the trigger in front (about when the fists touch: fists first, then the
+knees come down as the arms give) and over 0.35 s at once behind (the hips flex early, so the robot sits
+down with the legs out in front instead of falling flat on its back).
 Jumping the legs to the pose at the trigger folded them in the air: feet 0.25-0.4 m up, and the knees or
 hips landed before the fists in 44-100 % of the reflex-only falls (6-9 % with the blend). Zero action
 therefore reaches for the ground and ends in the hand-off pose; the policy learns the landing (when the
@@ -135,12 +151,12 @@ fixed observation scales instead of empirical normalisation.
 
 ```bash
 # laptop, MuJoCo (same URDF, gains, starts and reward), ~25 min for 2000 iterations
-python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 2000 --out ~/vigor_work/safefall_mj/run17s1
-python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run17s1/model_1999.pt --render rollouts.png
+python scripts/vigor/safefall_mujoco.py train --envs 64 --iters 2000 --seed 0 --out ~/vigor_work/safefall_mj/run21s0
+python scripts/vigor/safefall_mujoco.py eval --ckpt ~/vigor_work/safefall_mj/run21s0/model_1999.pt --render rollouts.png
 python scripts/vigor/safefall_mujoco.py eval --passive
 # GPU, Isaac
-python scripts/rsl_rl/train.py --task Booster-K1-SafeFall-Flat-v0 --headless --run_name share --max_iterations 6000
-python scripts/vigor/eval_safefall.py --run share --sweep 500 --num_envs 256 --headless
+python scripts/rsl_rl/train.py --task Booster-K1-SafeFall-Flat-v0 --headless --run_name sit --max_iterations 6000
+python scripts/vigor/eval_safefall.py --run sit --sweep 500 --num_envs 256 --headless
 python scripts/vigor/eval_safefall.py --run share --direction forward --follow --real_time --num_envs 16
 ```
 
@@ -149,7 +165,8 @@ and their peak forces (body weights); `impact` (the `impact` term integrated ove
 (largest step-mean ground force through one arm, body weights); `max_peak` (same for any single body but
 the feet); `arm_share` (the arms' share of the ground impulse, feet aside, in the 0.5 s after the first
 touch-down); `fist_speed` (fastest downward speed of a fist tip within 5 cm of touching, m/s);
-`fists_first` (no head, trunk, upper-arm or leg contact before the first fist contact); `foot_lift`
+`fists_first` (no head, trunk, upper-arm or leg contact well before the first fist contact); `fist_width`
+(widest the fists got across the trunk, m); `foot_lift`
 (highest foot origin, m); `leg_spread` (largest hip roll / yaw deviation from the hand-off pose, rad);
 `support` (fraction of the time after touch-down spent supported);
 `upright_end`; `flipped` (turned round by the end: forward fall chest up / backward fall chest down);
@@ -161,8 +178,11 @@ identical falls and ranks them by `safefall_math.score` (handoff_end + fists_fir
 trunk_hit - 0.5 impact - pose_rms).
 
 Hand-off poses (`safefall_math.HANDOFF_POSES`): symmetric PD targets the K1 rests in on several contacts
--- front: fists 0.21, knees 0.18, toes 0.14 body weights each; back: hips 0.30, heels 0.11, fists 0.09 --
-on its PD gains alone (arms < 2 Nm), keeping those contacts through 0.3 / 0.6 m/s pushes of the trunk in
+-- front: fists 0.20, knees 0.19-0.21, toes 0.13 body weights each, fists 0.28 m apart (search limit 0.30;
+the first front pose had them 0.45 apart, arms flung out); back: sitting upright with the legs out in
+front, hips 0.22, heels 0.16, fists 0.13 behind, 0.21 m apart (the first back pose sat with the knees up,
+which falls only reached through a deep squat mid-fall: they straightened the knees and rolled back) --
+on its PD gains alone (arms < 3 Nm), keeping those contacts through 0.3 / 0.6 m/s pushes of the trunk in
 four directions, head 0.31-0.33 m up, inside the soft joint limits. The old fist planks put 0.31 body
 weights on each arm. `scripts/vigor/handoff_pose.py` drops random symmetric candidates on the floor with
 the pose as PD targets and ranks those that qualify by the static load (sum of squared contact forces);

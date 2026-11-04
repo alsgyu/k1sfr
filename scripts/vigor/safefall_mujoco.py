@@ -206,7 +206,7 @@ class SafeFallEnv:
                 d.qvel[self.vadr] = self.rng.uniform(-0.1, 0.1, len(q))
             self.prev_qvel[i] = d.qvel[self.vadr]
             self.prev_z[i] = d.xpos[self.head_body, 2], d.xpos[self.trunk_body, 2]
-            self.prev_fist[i] = self._fist_z(np.stack([d.xpos[self.hand_bodies]]), np.stack([d.xquat[self.hand_bodies]]))[0]
+            self.prev_fist[i] = self._fists(np.stack([d.xpos[self.hand_bodies]]), np.stack([d.xquat[self.hand_bodies]]))[0, :, 2]
         self.last_action[ids] = 0.0
         self.episode_length_buf[torch.as_tensor(ids)] = 0
         for k in self.ep_sums:
@@ -214,9 +214,9 @@ class SafeFallEnv:
         self.hist[ids] = 0.0
 
     @staticmethod
-    def _fist_z(hand_pos: np.ndarray, hand_quat: np.ndarray) -> np.ndarray:
+    def _fists(hand_pos: np.ndarray, hand_quat: np.ndarray) -> np.ndarray:
         pos, _ = sf.fist_tips(torch.as_tensor(hand_pos, dtype=torch.float32), torch.as_tensor(hand_quat, dtype=torch.float32))
-        return pos[..., 2].numpy()
+        return pos.numpy()
 
     def _substeps(self, chunk):
         for i in chunk:
@@ -273,7 +273,7 @@ class SafeFallEnv:
         new = ~self.triggered & (-g[:, 2].numpy() < sf.TRIGGER_COS)  # the fall detector (as Isaac)
         facing = sf.facing_from_gravity(g).numpy()
         self.facing[new] = facing[new]
-        self.side[new] = np.where(facing[new] >= 0.0, 1.0, -1.0)
+        self.side[new] = sf.initial_side(torch.as_tensor(facing[new])).numpy()
         self.fall_time = np.where(self.triggered, self.fall_time + self.step_dt, 0.0)
         self.triggered |= new
         self.side = sf.update_side(torch.as_tensor(self.side, dtype=torch.float32), g).numpy().astype(np.float64)
@@ -291,8 +291,10 @@ class SafeFallEnv:
         head_z = np.array([d.xpos[self.head_body, 2] for d in self.datas])
         trunk_z = np.array([d.xpos[self.trunk_body, 2] for d in self.datas])
         hand_z = np.array([d.xpos[self.hand_bodies, 2].min() for d in self.datas])
-        fist_z = self._fist_z(np.stack([d.xpos[self.hand_bodies] for d in self.datas]),
-                              np.stack([d.xquat[self.hand_bodies] for d in self.datas]))
+        hand_pos = np.stack([d.xpos[self.hand_bodies] for d in self.datas])
+        fist_pos = self._fists(hand_pos, np.stack([d.xquat[self.hand_bodies] for d in self.datas]))
+        fist_z = fist_pos[..., 2]
+        widths = sf.arm_width(*(torch.as_tensor(x, dtype=torch.float32) for x in (qpos[:, :3], qpos[:, 3:7], hand_pos, fist_pos)))
         foot_z = np.stack([d.xpos[self.foot_bodies, 2] for d in self.datas])
         f = {g: torch.as_tensor(self.peak[:, b].sum(1), dtype=torch.float32) for g, b in self.body.items()}
         fists_before = self.fist_down.copy()
@@ -300,6 +302,7 @@ class SafeFallEnv:
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, body_force=T(self.mean_force[:, self.contact_bodies]), head_h=T(head_z), trunk_h=T(trunk_z),
                              hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt), foot_h=T(foot_z),
+                             arm_width=widths,
                              fists_before=torch.as_tensor(fists_before),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt),
                              trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]),
