@@ -173,7 +173,7 @@ def test_safefall_math():
     body = {b: i for i, b in enumerate(sf.CONTACT_BODIES)}
 
     def state(trunk_h, chest_z=-0.9, facing=1.0, head_h=0.3, q=None, side=None, bodies=None, fist_h=sf.FIST_TOUCH_H,
-              fist_vz=0.0, foot_h=0.05, fists_before=True, widths=(0.32, 0.28), **force):
+              fist_vz=0.0, foot_h=0.05, fists_before=True, widths=(0.32, 0.28), elbow_max=0.0, **force):
         """Group forces in body weights (split evenly over the group's bodies for body_force, unless
         ``bodies`` gives per-body step-mean forces in body weights)."""
         f = {g: z + force.get(g, 0.0) * sf.WEIGHT for g in sf.CONTACT_GROUPS}
@@ -190,7 +190,8 @@ def test_safefall_math():
                             fist_h=torch.full((n, 2), fist_h), fist_vz=torch.full((n, 2), fist_vz),
                             foot_h=torch.full((n, 2), foot_h), fist_touched=torch.full((n, 2), fists_before),
                             arm_width=torch.tensor(widths).expand(n, 2), head_vz=z,
-                            trunk_vz=z, gravity_b=grav, q=q.float().expand(n, -1), facing=z + facing, side=z + side)
+                            trunk_vz=z, gravity_b=grav, q=q.float().expand(n, -1), elbow_max=z.unsqueeze(-1).expand(n, 2) + elbow_max,
+                            facing=z + facing, side=z + side)
 
     kneel = dict(trunk_h=0.27, fist_l=0.2, fist_r=0.2, legs=0.35, feet=0.25)
     kneeling, _ = sf.reward(state(**kneel), 0.02)
@@ -244,12 +245,31 @@ def test_safefall_math():
     assert (sf.terms(state(**early | {"legs": 0.0, "fist_l": 0.3}))["early_contact"] == 0).all()
     # arms flung out: elbows / fists wider across the trunk than the hand-off pose + 5 cm
     assert (sf.terms(state(**kneel))["arm_width"] == 0).all()
-    assert torch.allclose(sf.terms(state(**kneel | {"widths": (0.32, 0.48)}))["arm_width"], torch.full((n,), 0.15**2))
+    assert torch.allclose(sf.terms(state(**kneel | {"widths": (0.32, 0.48)}))["arm_width"], torch.full((n,), (0.48 - sf.ARM_WIDTH_MAX["front"][1]) ** 2))
     assert (sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["back"]}))["arm_width"] == 0).all()
-    back_narrow = sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["front"]}))["arm_width"]  # per side
+    back_narrow = sf.terms(state(**sit | {"facing": -1.0, "widths": (0.37, 0.33)}))["arm_width"]  # per side
     assert torch.allclose(back_narrow, torch.full((n,), (sf.ARM_WIDTH_MIN["back"][1] - 0.33) ** 2))  # fists 0.33 < 0.35
     together = sf.terms(state(**sit | {"facing": -1.0, "widths": (0.30, 0.21)}))["arm_width"]  # fists behind the back
     assert torch.allclose(together, torch.full((n,), 0.14**2))
+    # an elbow straighter than its deepest bend since the touch-down (beyond REBOUND_FREE) costs, kneeling side only
+    flex = float(sf.elbow_flexion(torch.tensor([sf.HANDOFF_POSES["front"]]))[0, 0])
+    assert abs(flex - 1.41) < 1e-6
+    opened = sf.terms(state(**kneel, elbow_max=flex + 0.4))["arm_rebound"]  # bent to 1.81, now at 1.41
+    assert torch.allclose(opened, torch.full((n,), 2 * (0.4 - sf.REBOUND_FREE)))
+    capped = sf.terms(state(**kneel, elbow_max=2.3))["arm_rebound"]  # folded to 2.3: measured from FOLD_MAX
+    assert torch.allclose(capped, torch.full((n,), 2 * (sf.FOLD_MAX - flex - sf.REBOUND_FREE)))
+    # folding the elbows beyond FOLD_MAX costs; back to it from the fold, arm_rebound charges nothing
+    el, er = (spec.ALL_JOINT_NAMES.index(j) for j in sf.ELBOWS)
+    folded = torch.tensor(sf.HANDOFF_POSES["front"]); folded[el], folded[er] = -2.25, 2.25
+    assert torch.allclose(sf.terms(state(**kneel | {"q": folded}, elbow_max=2.25))["elbow_fold"], torch.full((n,), 2 * (2.25 - sf.FOLD_MAX)))
+    at_cap = folded.clone(); at_cap[el], at_cap[er] = -sf.FOLD_MAX, sf.FOLD_MAX
+    t = sf.terms(state(**kneel | {"q": at_cap}, elbow_max=2.25))
+    assert (t["elbow_fold"] == 0).all() and (t["arm_rebound"] == 0).all()
+    assert (sf.terms(state(**kneel)))["elbow_fold"].eq(0).all()  # the hand-off pose
+    assert (sf.terms(state(**kneel, elbow_max=flex + 0.1))["arm_rebound"] == 0).all()  # within REBOUND_FREE
+    assert (sf.terms(state(**kneel, elbow_max=flex - 0.3))["arm_rebound"] == 0).all()  # bending deeper now
+    assert (sf.terms(state(**kneel | {"fists_before": False}, elbow_max=flex + 0.5))["arm_rebound"] == 0).all()  # reaching
+    assert (sf.terms(state(**sit | {"facing": -1.0}, elbow_max=2.2))["arm_rebound"] == 0).all()  # sitting: free
     # a fist that touched lifted off the ground again (feeling about for a spot) costs; resting on it does not
     assert (sf.terms(state(**kneel))["fist_relift"] == 0).all()
     lifted = kneel | {"fist_l": 0.0, "fist_r": 0.0, "fist_h": 0.2}
@@ -279,12 +299,30 @@ def test_safefall_math():
     hold = torch.zeros(2, len(spec.ACTION_JOINT_NAMES))
     legs, arms = sf.LEG_ACTIONS, [i for i in range(hold.shape[1]) if i not in sf.LEG_ACTIONS]
     side = torch.tensor([1.0, -1.0])
-    at0 = sf.reflex_targets(side, hold, torch.zeros(2))
-    assert torch.equal(at0[:, legs], hold[:, legs]) and torch.allclose(at0[:, arms], reflex[:, arms])
+    at0 = sf.reflex_targets(side, hold, torch.zeros(2), torch.zeros(2, 2))
+    assert torch.equal(at0[:, legs], hold[:, legs]) and torch.allclose(at0[1, arms], reflex[1, arms])  # back: pose at once
+    assert torch.allclose(at0[0, sf.ARM_ACTIONS], torch.tensor(sf.REACH_ARMS["front"]))  # front: reach, elbows nearly straight
+    late = sf.reflex_targets(side, hold, torch.zeros(2), torch.ones(2, 2))
+    assert torch.allclose(late[:, arms], reflex[:, arms])  # yielded all the way: the pose's bent arms
+    one = sf.reflex_targets(side, hold, torch.full((2,), 2.0), torch.tensor([[1.0, 0.0], [0.0, 0.0]]))  # left arm bent only
+    assert torch.allclose(one[0, :4], reflex[0, :4]) and torch.allclose(one[0, 4:8], torch.tensor(sf.REACH_ARMS["front"][4:]))
+    # the reflex arm yields by what the elbow is bent beyond its reflex target past LOAD_DEFLECT, never back
+    reach = torch.tensor([[*sf.REACH_ARMS["front"], *sf.HANDOFF_POSES["front"][10:]]] * 2)
+    el = spec.ACTION_JOINT_NAMES.index("Left_Elbow_Yaw")
+    span = 1.41 - 0.47
+    q_enc = reach.clone(); q_enc[:, el] -= sf.LOAD_DEFLECT + 0.2  # left elbow pushed 0.45 beyond its target (flexion -q)
+    front = torch.ones(2)
+    b = sf.update_arm_bend(torch.zeros(2, 2), front, q_enc, torch.tensor([True, False]))  # second env not triggered
+    assert torch.allclose(b, torch.tensor([[0.2 / span, 0.0], [0.0, 0.0]]), atol=1e-5)
+    assert torch.allclose(sf.update_arm_bend(b, front, reach, torch.ones(2, dtype=torch.bool)), b)  # straightened again: stays
+    assert torch.allclose(sf.update_arm_bend(b, front, q_enc, torch.ones(2, dtype=torch.bool))[0], b[0])  # within LOAD_DEFLECT of the new target
+    q_enc[:, el] -= 2.0
+    assert sf.update_arm_bend(b, front, q_enc, torch.ones(2, dtype=torch.bool))[0, 0] == 1.0  # up to the pose
+    assert (sf.update_arm_bend(torch.zeros(2, 2), -front, q_enc, torch.ones(2, dtype=torch.bool)) == 0).all()  # behind: no reach
     mid = sf.reflex_targets(side, hold, torch.full((2,), sf.LEG_DELAY_S["front"] + 0.5 * sf.LEG_RAMP_S["front"]))
     assert torch.allclose(mid[0, legs], 0.5 * reflex[0, legs])  # smoothstep(0.5) = 0.5
     assert (mid[1, legs].abs() > 0.5 * reflex[1, legs].abs() - 1e-6).all()  # back started at once
-    done = sf.reflex_targets(side, hold, torch.full((2,), 2.0))
+    done = sf.reflex_targets(side, hold, torch.full((2,), 2.0), torch.ones(2, 2))
     assert torch.allclose(done, reflex)
     g = torch.tensor([[0.6, 0.0, -0.8], [-0.5, 0.0, -0.87], [0.3, 0.0, -0.95], [-0.1, 0.0, -0.99]])
     assert torch.equal(sf.update_side(torch.tensor([-1.0, 1.0, -1.0, 1.0]), g), torch.tensor([1.0, -1.0, -1.0, 1.0]))  # sitting leaning forward stays back
