@@ -63,7 +63,10 @@ class SafeFallSceneCfg(InteractiveSceneCfg):
     )
     robot: ArticulationCfg = ROBOT
     # history spans the policy step's physics substeps, so the peak impact force is seen
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=spec.DECIMATION, track_air_time=False)
+    # ground contacts only (force_matrix_w_history): the K1 collides with itself, and the net forces counted a fist
+    # pressed against the trunk as a chest / back hit and a fist on the thigh as a fist on the ground
+    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=spec.DECIMATION, track_air_time=False,
+                                      filter_prim_paths_expr=[mdp.GROUND_COLLIDER])
     light = AssetBaseCfg(prim_path="/World/light", spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0))
     sky_light = AssetBaseCfg(prim_path="/World/skyLight", spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0))
 
@@ -204,6 +207,7 @@ class RewardsCfg:
     foot_lift = _sf("foot_lift")
     leg_spread = _sf("leg_spread")
     arm_width = _sf("arm_width")
+    fist_relift = _sf("fist_relift")
     facing = _sf("facing")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG), guarded against blow-ups
     action_rate = _reg("action_rate_l2", -0.01)
