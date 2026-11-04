@@ -20,10 +20,10 @@ import torch
 
 try:
     from . import spec
-    from .torch_math import quat_apply, quat_from_axis_angle, quat_from_yaw, quat_mul
+    from .torch_math import quat_apply, quat_apply_inverse, quat_from_axis_angle, quat_from_yaw, quat_mul
 except ImportError:  # loaded as a top-level module by the laptop-side scripts
     import spec
-    from torch_math import quat_apply, quat_from_axis_angle, quat_from_yaw, quat_mul
+    from torch_math import quat_apply, quat_apply_inverse, quat_from_axis_angle, quat_from_yaw, quat_mul
 
 MASS = 19.67  # K1_22dof_jy.urdf total mass [kg]
 WEIGHT = MASS * 9.81
@@ -53,6 +53,7 @@ FOOT_FREE = 0.15
 # hip roll / yaw further than this from the hand-off pose spread or twist the legs
 SPREAD_JOINTS = ("Left_Hip_Roll", "Left_Hip_Yaw", "Right_Hip_Roll", "Right_Hip_Yaw")
 SPREAD_FREE = 0.1  # rad
+EARLY_GRACE_H = 0.05  # m: a fist this close to touching lands together with whatever touches now
 # fist tip: centre of the rounded far end of hand_link in its frame (the arm points along +-y); it is
 # FIST_TOUCH_H up when the fist touches the ground
 FIST_TIPS = ((0.0, 0.2, 0.0), (0.0, -0.2, 0.0))
@@ -94,46 +95,64 @@ IMPACT_WEIGHTS = {  # by how weak the joints behind the body are
 
 # Hand-off poses for the get-up: symmetric PD targets the K1 rests in on several contacts, each carrying
 # 0.1-0.3 body weights (the old fist planks put 0.62 on the arms), held on the PD gains alone (arms
-# < 2 Nm), surviving 0.3 / 0.6 m/s pushes of the trunk in any direction, head 0.31-0.33 m up, inside the
+# < 3 Nm), surviving 0.3 / 0.6 m/s pushes of the trunk in any direction, head 0.31-0.33 m up, inside the
 # soft joint limits.  Under load
 # the joints settle up to ~0.08 rad from these targets (handoff_poses.json has the settled angles and the
 # root state).  spec.ALL_JOINT_NAMES order (= INHA-Recovery-Motion K1_JOINT_ORDER); found, checked and
 # exported by scripts/vigor/handoff_pose.py.
 HANDOFF_POSES = {
-    # chest down, kneeling on fists, knees and toes, elbows a little bent: fists 0.21 each, knees 0.18, toes 0.14
-    "front": (0.000, 0.000, -1.200, -1.300, 0.300, -0.400, -1.200, 1.300, 0.300, 0.400, -1.050, 0.150, 0.000, 1.650, 0.050, 0.000, -1.050, -0.150, 0.000, 1.650, 0.050, 0.000),
-    # chest up, sitting on the hips, fists behind, heels down: hips 0.30 each, fists 0.09, heels 0.11
-    "back": (0.000, 0.000, 0.950, -1.150, 0.300, -0.200, 0.950, 1.150, 0.300, 0.200, -1.800, 0.150, 0.000, 0.850, -0.350, 0.000, -1.800, -0.150, 0.000, 0.850, -0.350, 0.000),
+    # chest down, kneeling on fists, knees and toes, elbows a little bent, fists 0.28 m apart (0.45 looked like
+    # arms flung out): fists 0.20 each, knees 0.19-0.21, toes 0.13
+    "front": (0.000, 0.000, -1.180, -1.500, 0.300, -0.470, -1.180, 1.500, 0.300, 0.470, -1.080, 0.150, 0.000, 1.710, 0.220, 0.000, -1.080, -0.150, 0.000, 1.710, 0.220, 0.000),
+    # sitting upright on the hips with the legs out in front on the ground, fists close behind (0.21 m apart):
+    # hips 0.22 each, heels 0.16, fists 0.13.  The knees-up sit (hips near the heels) needed a deep squat
+    # mid-fall; sitting down with the hips flexed early and the legs out is what backward falls did when
+    # they sat down at all
+    "back": (0.000, 0.000, 0.740, -1.520, 0.860, -0.340, 0.740, 1.520, 0.860, 0.340, -1.560, 0.150, 0.000, 0.180, -0.590, 0.000, -1.560, -0.150, 0.000, 0.180, -0.590, 0.000),
 }
 # root height [m] and trunk pitch [rad] resting in those poses (handoff_pose.py check)
-HANDOFF_ROOTS = {"front": (0.274, 1.089), "back": (0.119, -0.292)}
+HANDOFF_ROOTS = {"front": (0.277, 1.058), "back": (0.124, -0.051)}
+# elbows (hand_link origins) and fist tips across the trunk in the hand-off poses (0.32 / 0.28 front,
+# 0.30 / 0.21 back) plus 5 cm: wider during the fall is arms flung out (arm_width)
+ARM_WIDTH_MAX = {"front": (0.37, 0.33), "back": (0.35, 0.26)}
 # The reflex picks the front or back pose by a latched side (+1 front, -1 back): set from the tilt
 # direction at the trigger, switched only once the chest clearly faces the other way.  Picking by the
 # sign of chest_z each step flipped the legs between the two poses whenever a side fall rolled through
-# chest-sideways, and the policy flailed its legs.
-SIDE_SWITCH = 0.25  # |chest_z| beyond which the latched side follows the chest (sitting has 0.29, kneeling -0.89)
+# chest-sideways, and the policy flailed its legs.  Only falls tipping clearly backward (facing below
+# BACK_FACING, within 60 deg of straight back) start with the sitting pose: side falls caught by it hit the
+# trunk in 61-67 % (sitting lands the hip, then the side of the trunk), by the kneeling pose in 0 %.
+BACK_FACING = -0.5
+# chest_z beyond which the latched side follows the chest: to front below -0.5, to back above 0.25 (kneeling
+# has -0.87; sitting upright 0.05, so leaning forward while sitting must not switch to the kneeling pose)
+SIDE_SWITCH = {"front": 0.5, "back": 0.25}
 # The legs go to the hand-off pose gradually, from the joint targets held at the trigger (smoothstep over
 # LEG_RAMP_S): jumping there at once folded them in the air (feet 0.25-0.4 m up) and put knees or hips down
 # before the fists in 44-100 % of the reflex-only falls.  Front: from about when the fists touch (0.15-0.2 s
-# after the trigger), so the knees come down as the arms give.  Back: at once; reflex-only backward falls
-# hit the head in 22 % with 0.5 s, 29 % with 0.25 s, > 60 % with 0.75 s, and 95 % squatting first (rolls
-# back like a ball).  The arms go to the pose at once (reach for the ground).
+# after the trigger), so the knees come down as the arms give.  Back: at once, sitting down; reflex-only
+# backward falls hit the head in 22 % with 0.5 s, 29 % with 0.25 s, > 60 % with 0.75 s, and 95 % squatting
+# first (rolls back like a ball).  The arms go to the pose at once (reach for the ground).
 LEG_DELAY_S = {"front": 0.15, "back": 0.0}
-LEG_RAMP_S = 0.5
+LEG_RAMP_S = {"front": 0.5, "back": 0.35}
 FALL_TIME_MAX = 1.0  # s: the actor observes the time since the trigger up to this
 LEG_ACTIONS = [i for i, n in enumerate(spec.ACTION_JOINT_NAMES) if "_Hip_" in n or "_Knee_" in n or "_Ankle_" in n]
+
+
+def initial_side(facing: torch.Tensor) -> torch.Tensor:
+    """Reflex side latched at the trigger from the tilt direction (``facing_from_gravity``)."""
+    return torch.where(facing >= BACK_FACING, 1.0, -1.0)
 
 
 def update_side(side: torch.Tensor, gravity_b: torch.Tensor) -> torch.Tensor:
     """Latched reflex side after this step's gravity (chest_z = -gravity_x)."""
     chest = -gravity_b[:, 0]
-    return torch.where(chest < -SIDE_SWITCH, 1.0, torch.where(chest > SIDE_SWITCH, -1.0, side))
+    return torch.where(chest < -SIDE_SWITCH["front"], 1.0, torch.where(chest > SIDE_SWITCH["back"], -1.0, side))
 
 
 def leg_blend(side: torch.Tensor, fall_time: torch.Tensor) -> torch.Tensor:
     """How far the legs' reflex has moved from the trigger pose to the hand-off pose (0-1, smoothstep)."""
     delay = torch.where(side > 0, LEG_DELAY_S["front"], LEG_DELAY_S["back"])
-    x = ((fall_time - delay) / LEG_RAMP_S).clamp(0.0, 1.0)
+    ramp = torch.where(side > 0, LEG_RAMP_S["front"], LEG_RAMP_S["back"])
+    x = ((fall_time - delay) / ramp).clamp(0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
 
 
@@ -177,10 +196,18 @@ WEIGHTS = {
     # the arms.  Swung down by the reflex the fists hit at 2.3-2.8 m/s (the trunk falls at 1.3-1.5), one
     # 20 ms step of 3 body weights through the arm that the impact term alone did not remove
     "fist_descent": -2.0,
-    # head, trunk, upper arms or legs on the ground before any fist has touched: the fists land first
+    # head, trunk, upper arms or legs on the ground well before the fists (early_contact): the fists land
+    # first or together with the rest
     "early_contact": -30.0,
-    # per m of foot origin above FOOT_FREE (each foot): the feet stay down
-    "foot_lift": -10.0,
+    # per m^2 of elbows / fists wider across the trunk than ARM_WIDTH_MAX: no arms flung out (-20 left the
+    # fists 0.31-0.35 m apart on the ground, shoulders rolled out by 0.2-0.3 rad).  Scaled by facing^2 (side
+    # falls free to reach out) it did not lower the side falls' trunk contacts (MuJoCo, 3 seeds)
+    "arm_width": -100.0,
+    # per m of foot origin above FOOT_FREE (each foot) once a fist has touched: the feet stay down after the
+    # landing.  Counted during the fall too, it kept the hips from flexing early in backward falls (the K1
+    # fell like a log and ended on its back, legs up) instead of sitting down with the legs out in front.
+    # -10 left backward falls rocking back on the hips after landing, legs 30-40 deg up
+    "foot_lift": -40.0,
     # per rad^2 of hip roll / yaw beyond SPREAD_FREE from the hand-off pose: no spread or twisted legs
     "leg_spread": -10.0,
     # turned round mid-fall (forward fall ending chest up, backward chest down).  Support does not care
@@ -211,6 +238,7 @@ class FallState:
     fist_h: torch.Tensor  # (N, 2) fist tips (FIST_TIPS) above the ground, left / right [m]
     fist_vz: torch.Tensor  # (N, 2) their vertical velocities [m/s]
     foot_h: torch.Tensor  # (N, 2) foot origins (FOOT_BODIES) above the ground [m]
+    arm_width: torch.Tensor  # (N, 2) elbows (hand_link origins) / fist tips apart across the trunk [m] (``arm_width``)
     fists_before: torch.Tensor  # (N,) bool: a fist touched the ground in an earlier step of the fall
     head_vz: torch.Tensor  # vertical velocities [m/s]
     trunk_vz: torch.Tensor
@@ -237,6 +265,14 @@ def fist_tips(hand_pos: torch.Tensor, hand_quat: torch.Tensor, hand_vel: torch.T
     r = quat_apply(hand_quat, torch.tensor(FIST_TIPS, device=hand_pos.device).expand_as(hand_pos))
     vel = None if hand_vel is None else hand_vel + torch.cross(hand_ang_vel, r, dim=-1)
     return hand_pos + r, vel
+
+
+def arm_width(root_pos: torch.Tensor, root_quat: torch.Tensor, hand_pos: torch.Tensor, fist_pos: torch.Tensor) -> torch.Tensor:
+    """(N, 2) distances across the trunk (its y axis) between the elbows (HAND_BODIES origins, (N, 2, 3)) and
+    between the fist tips (``fist_tips``), from the root pose (world frame)."""
+    q = root_quat.unsqueeze(1).expand(-1, 2, -1)
+    across = lambda p: quat_apply_inverse(q, p - root_pos.unsqueeze(1))[..., 1]  # noqa: E731
+    return torch.stack([across(p)[:, 0] - across(p)[:, 1] for p in (hand_pos, fist_pos)], dim=-1)
 
 
 def chest_z(quat: torch.Tensor) -> torch.Tensor:
@@ -339,9 +375,19 @@ def leg_spread(s: FallState) -> torch.Tensor:
 
 
 def early_contact(s: FallState) -> torch.Tensor:
-    """Head, trunk, upper arms or legs touch while no fist has touched yet (a fist in the same step is too late)."""
+    """Head, trunk, upper arms or legs touch while no fist has touched yet and none is touching or within
+    EARLY_GRACE_H of touching: landing together with the fists is fine.  Without that tolerance (a fist had to
+    touch in an earlier step) the policy kept the knees straight in backward falls to put the fists down
+    before the hips, fell like a log and rolled back."""
     f = s.force
-    return ~s.fists_before & _on(f["head"] + f["trunk"] + f["arms"] + f["legs"])
+    fists = s.fists_before | _on(f["fist_l"] + f["fist_r"]) | (s.fist_h.amin(dim=-1) < FIST_TOUCH_H + EARLY_GRACE_H)
+    return ~fists & _on(f["head"] + f["trunk"] + f["arms"] + f["legs"])
+
+
+def arm_flare(s: FallState) -> torch.Tensor:
+    """Sum over elbows / fists of (width across the trunk - ARM_WIDTH_MAX of the latched side)_+^2 [m^2]."""
+    limit = torch.tensor([ARM_WIDTH_MAX["front"], ARM_WIDTH_MAX["back"]], device=s.q.device)[(s.side < 0).long()]
+    return (s.arm_width - limit).clamp_min(0.0).square().sum(dim=-1)
 
 
 def pose_error(s: FallState) -> torch.Tensor:
@@ -374,8 +420,9 @@ def terms(s: FallState) -> dict[str, torch.Tensor]:
         "trunk_descent": (-s.trunk_vz).clamp_min(0.0).square() * torch.exp(-(s.trunk_h - 0.1).clamp_min(0.0) / 0.2),
         "fist_descent": ((-s.fist_vz).clamp_min(0.0).square() * torch.exp(-(s.fist_h - FIST_TOUCH_H).clamp_min(0.0) / 0.05)).sum(-1),
         "early_contact": early_contact(s).float(),
-        "foot_lift": (s.foot_h - FOOT_FREE).clamp_min(0.0).sum(dim=-1),
+        "foot_lift": (s.foot_h - FOOT_FREE).clamp_min(0.0).sum(dim=-1) * s.fists_before,
         "leg_spread": leg_spread(s),
+        "arm_width": arm_flare(s),
         "facing": turned,
     }
 
@@ -463,7 +510,8 @@ class OutcomeTracker:
     max_peak    : largest step-mean ground force on any single body but the feet [body weights]
     arm_share   : share of the arms in the ground impulse (feet aside) over LANDING_S after the first touch-down
     fist_speed  : fastest downward speed of a fist tip within 5 cm of touching the ground [m/s]
-    fists_first : no head, trunk, upper-arm or leg contact before the first fist contact (``early_contact``)
+    fists_first : no head, trunk, upper-arm or leg contact well before the first fist contact (``early_contact``)
+    fist_width  : widest the fist tips got across the trunk while a fist touched [m] (hand-off poses: front 0.28, back 0.62)
     foot_lift   : highest foot origin above the ground [m] (standing 0.03, kneeling 0.12, sitting 0.08)
     leg_spread  : largest hip roll / yaw deviation from the hand-off pose [rad]
     support     : fraction of the time after the first touch-down spent supported (``support``)
@@ -476,7 +524,7 @@ class OutcomeTracker:
     """
 
     KEYS = ("head_hit", "trunk_hit", "head_peak", "trunk_peak", "impact", "arm_peak", "max_peak", "arm_share",
-            "fist_speed", "fists_first", "foot_lift", "leg_spread", "support", "upright_end", "flipped", "handoff_end",
+            "fist_speed", "fists_first", "fist_width", "foot_lift", "leg_spread", "support", "upright_end", "flipped", "handoff_end",
             "pose_rms", "asym_rms")
 
     def __init__(self, num_envs: int, device="cpu", dt: float = spec.POLICY_DT):
@@ -517,6 +565,7 @@ class OutcomeTracker:
             "arm_share": arm_imp / all_imp.clamp_min(1e-6),
             "fist_speed": torch.maximum(v["fist_speed"], ((-s.fist_vz) * (s.fist_h < FIST_TOUCH_H + 0.05)).amax(dim=-1)),
             "fists_first": 1.0 - early.float(),
+            "fist_width": torch.maximum(v["fist_width"], s.arm_width[:, 1] * _on(fists)),
             "foot_lift": torch.maximum(v["foot_lift"], s.foot_h.amax(dim=-1)),
             "leg_spread": torch.maximum(v["leg_spread"], (s.q[:, spread] - handoff_target(s)[:, spread]).abs().amax(dim=-1)),
             "support": supported / after.clamp_min(1.0),

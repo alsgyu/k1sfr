@@ -166,14 +166,14 @@ def test_safefall_math():
     assert math.isclose(sf.TRIGGER_COS, math.cos(math.radians(20.0)))
     held = st["handoff"] >= 0  # hand-off starts: chest down in front, up in back, at rest
     assert 0.1 < held.float().mean() < 0.3 and (st["direction"][held] == len(sf.DIRECTIONS)).all()
-    assert (sf.chest_z(st["root_quat"])[st["handoff"] == 0] < -0.8).all() and (sf.chest_z(st["root_quat"])[st["handoff"] == 1] > sf.SIDE_SWITCH).all()
+    assert (sf.chest_z(st["root_quat"])[st["handoff"] == 0] < -0.8).all() and (sf.chest_z(st["root_quat"])[st["handoff"] == 1] > -sf.SIDE_SWITCH["front"]).all()
     assert (st["lin_vel"][held] == 0).all() and torch.equal(st["facing"][held], 1.0 - 2.0 * st["handoff"][held].float())
     n = 4
     z = torch.zeros(n)
     body = {b: i for i, b in enumerate(sf.CONTACT_BODIES)}
 
     def state(trunk_h, chest_z=-0.9, facing=1.0, head_h=0.3, q=None, side=None, bodies=None, fist_h=sf.FIST_TOUCH_H,
-              fist_vz=0.0, foot_h=0.05, fists_before=True, **force):
+              fist_vz=0.0, foot_h=0.05, fists_before=True, widths=(0.32, 0.28), **force):
         """Group forces in body weights (split evenly over the group's bodies for body_force, unless
         ``bodies`` gives per-body step-mean forces in body weights)."""
         f = {g: z + force.get(g, 0.0) * sf.WEIGHT for g in sf.CONTACT_GROUPS}
@@ -188,7 +188,8 @@ def test_safefall_math():
         grav = torch.tensor([-chest_z, 0.0, -math.sqrt(1 - chest_z**2)]).expand(n, 3)
         return sf.FallState(force=f, body_force=per_body, head_h=z + head_h, trunk_h=z + trunk_h, hand_h=z + 0.02,
                             fist_h=torch.full((n, 2), fist_h), fist_vz=torch.full((n, 2), fist_vz),
-                            foot_h=torch.full((n, 2), foot_h), fists_before=torch.full((n,), fists_before), head_vz=z,
+                            foot_h=torch.full((n, 2), foot_h), fists_before=torch.full((n,), fists_before),
+                            arm_width=torch.tensor(widths).expand(n, 2), head_vz=z,
                             trunk_vz=z, gravity_b=grav, q=q.float().expand(n, -1), facing=z + facing, side=z + side)
 
     kneel = dict(trunk_h=0.27, fist_l=0.2, fist_r=0.2, legs=0.35, feet=0.25)
@@ -236,12 +237,20 @@ def test_safefall_math():
     assert torch.allclose(tip[1], torch.tensor([[0.0, 0.0, 0.2], [0.0, 0.0, -0.2]]), atol=1e-6)  # +90 deg about x
     assert torch.allclose(tip_vel[0, :, 2], torch.tensor([0.2, -0.2]), atol=1e-6)  # w x r
     # knees down before any fist: early contact; feet lifted and legs spread cost
-    early = dict(trunk_h=0.4, legs=0.5, fists_before=False)
+    early = dict(trunk_h=0.4, legs=0.5, fists_before=False, fist_h=0.2)
     assert (sf.terms(state(**early))["early_contact"] == 1).all()
-    assert (sf.terms(state(**early | {"fist_l": 0.3}))["early_contact"] == 1).all()  # a fist in the same step is too late
+    assert (sf.terms(state(**early | {"fist_l": 0.3}))["early_contact"] == 0).all()  # landing together is fine
+    assert (sf.terms(state(**early | {"fist_h": sf.FIST_TOUCH_H + 0.02}))["early_contact"] == 0).all()  # fists about to touch
     assert (sf.terms(state(**early | {"legs": 0.0, "fist_l": 0.3}))["early_contact"] == 0).all()
+    # arms flung out: elbows / fists wider across the trunk than the hand-off pose + 5 cm
+    assert (sf.terms(state(**kneel))["arm_width"] == 0).all()
+    assert torch.allclose(sf.terms(state(**kneel | {"widths": (0.32, 0.48)}))["arm_width"], torch.full((n,), 0.15**2))
+    assert (sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["back"]}))["arm_width"] == 0).all()
+    back_wide = sf.terms(state(**sit | {"facing": -1.0, "widths": sf.ARM_WIDTH_MAX["front"]}))["arm_width"]  # per side
+    assert torch.allclose(back_wide, torch.full((n,), 0.02**2 + 0.07**2))
     assert (sf.terms(state(**kneel))["early_contact"] == 0).all() and (sf.terms(state(**kneel))["foot_lift"] == 0).all()
     assert torch.allclose(sf.terms(state(**kneel | {"foot_h": 0.35}))["foot_lift"], torch.full((n,), 0.4))
+    assert (sf.terms(state(**kneel | {"foot_h": 0.35, "fists_before": False}))["foot_lift"] == 0).all()  # in the air: free
     spread_q = torch.tensor(sf.HANDOFF_POSES["front"])
     spread_q[[spec.ALL_JOINT_NAMES.index(j) for j in ("Left_Hip_Yaw", "Right_Hip_Yaw")]] = torch.tensor([0.4, -0.4])
     assert (sf.terms(state(**kneel))["leg_spread"] == 0).all()
@@ -252,7 +261,7 @@ def test_safefall_math():
     # head about to touch costs before contact
     low_head, _ = sf.reward(state(**kneel | {"head_h": 0.08}), 0.02)
     assert (low_head < kneeling).all()
-    # zero action targets the hand-off pose of the latched side; the side follows the chest only past +-0.25
+    # zero action targets the hand-off pose of the latched side; the side follows the chest only past -0.5 / 0.25
     assert spec.ACTION_JOINT_NAMES == spec.ALL_JOINT_NAMES[len(spec.HEAD_JOINT_NAMES):]
     reflex = sf.reflex_targets(torch.tensor([1.0, -1.0]))
     assert torch.allclose(reflex[0], torch.tensor(sf.HANDOFF_POSES["front"][2:])) and torch.allclose(reflex[1], torch.tensor(sf.HANDOFF_POSES["back"][2:]))
@@ -262,14 +271,15 @@ def test_safefall_math():
     side = torch.tensor([1.0, -1.0])
     at0 = sf.reflex_targets(side, hold, torch.zeros(2))
     assert torch.equal(at0[:, legs], hold[:, legs]) and torch.allclose(at0[:, arms], reflex[:, arms])
-    mid = sf.reflex_targets(side, hold, torch.full((2,), sf.LEG_DELAY_S["front"] + 0.5 * sf.LEG_RAMP_S))
+    mid = sf.reflex_targets(side, hold, torch.full((2,), sf.LEG_DELAY_S["front"] + 0.5 * sf.LEG_RAMP_S["front"]))
     assert torch.allclose(mid[0, legs], 0.5 * reflex[0, legs])  # smoothstep(0.5) = 0.5
     assert (mid[1, legs].abs() > 0.5 * reflex[1, legs].abs() - 1e-6).all()  # back started at once
     done = sf.reflex_targets(side, hold, torch.full((2,), 2.0))
     assert torch.allclose(done, reflex)
-    g = torch.tensor([[0.5, 0.0, -0.87], [-0.5, 0.0, -0.87], [0.1, 0.0, -0.99], [-0.1, 0.0, -0.99]])
-    assert torch.equal(sf.update_side(torch.tensor([-1.0, 1.0, -1.0, 1.0]), g), torch.tensor([1.0, -1.0, -1.0, 1.0]))
+    g = torch.tensor([[0.6, 0.0, -0.8], [-0.5, 0.0, -0.87], [0.3, 0.0, -0.95], [-0.1, 0.0, -0.99]])
+    assert torch.equal(sf.update_side(torch.tensor([-1.0, 1.0, -1.0, 1.0]), g), torch.tensor([1.0, -1.0, -1.0, 1.0]))  # sitting leaning forward stays back
     assert torch.equal(sf.update_side(torch.tensor([1.0]), torch.tensor([[-0.288, 0.0, -0.958]])), torch.tensor([-1.0]))  # sitting is back
+    assert torch.equal(sf.initial_side(torch.tensor([1.0, 0.1, -0.3, -0.7, -1.0])), torch.tensor([1.0, 1.0, 1.0, -1.0, -1.0]))  # sideways: kneel
     # the tracker integrates the impact, measures the arms' share and hands the last-step pose to end_poses
     tr = sf.OutcomeTracker(n)
     landing = state(0.27, fist_l=1.0, fist_r=1.0, legs=1.0, bodies={"left_hand_link": 1.0, "right_hand_link": 1.0,
