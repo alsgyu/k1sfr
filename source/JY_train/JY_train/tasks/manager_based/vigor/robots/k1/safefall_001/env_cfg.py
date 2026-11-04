@@ -208,6 +208,8 @@ class RewardsCfg:
     leg_spread = _sf("leg_spread")
     arm_width = _sf("arm_width")
     fist_relift = _sf("fist_relift")
+    arm_rebound = _sf("arm_rebound")
+    elbow_fold = _sf("elbow_fold")
     facing = _sf("facing")
     # regularisation (same weights as scripts/vigor/safefall_mujoco.py REG), guarded against blow-ups
     action_rate = _reg("action_rate_l2", -0.01)

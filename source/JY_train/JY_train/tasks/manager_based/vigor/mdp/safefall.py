@@ -80,6 +80,9 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
     fist_touched = env.safefall_fist_down.clone()
     fist_on = torch.stack([force["fist_l"], force["fist_r"]], dim=-1) > sf.CONTACT_THRESHOLD
     env.safefall_fist_down |= env.safefall_triggered.unsqueeze(-1) & fist_on
+    elbow_max = env.safefall_elbow_max.clone()
+    flex = sf.elbow_flexion(robot.data.joint_pos[:, ids.joints])
+    env.safefall_elbow_max[:] = torch.where(env.safefall_fist_down, torch.maximum(elbow_max, flex), elbow_max)
     state = sf.FallState(
         force=force,
         body_force=history[:, :, ids.bodies].mean(dim=1),
@@ -95,6 +98,7 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         trunk_vz=robot.data.root_lin_vel_w[:, 2],
         gravity_b=robot.data.projected_gravity_b,
         q=robot.data.joint_pos[:, ids.joints],
+        elbow_max=elbow_max,
         facing=getattr(env, "safefall_facing", torch.zeros_like(ground)),
         side=getattr(env, "safefall_side", torch.ones_like(ground)),
     )
@@ -176,6 +180,8 @@ def _start_buffers(env: ManagerBasedEnv):
         env.safefall_joint_bias = torch.zeros(n, len(spec.ALL_JOINT_NAMES), device=env.device)  # encoder offsets
         env.safefall_fall_time = torch.zeros(n, device=env.device)  # since the trigger [s]
         env.safefall_fist_down = torch.zeros(n, 2, dtype=torch.bool, device=env.device)  # left / right fist touched since the trigger
+        env.safefall_elbow_max = torch.zeros(n, 2, device=env.device)  # deepest elbow flexion since its fist touched
+        env.safefall_arm_bend = torch.zeros(n, 2, device=env.device)  # reflex arms yielded to the pose (0-1)
 
 
 def update_trigger(env: ManagerBasedEnv, gravity_b: torch.Tensor) -> torch.Tensor:
@@ -261,6 +267,8 @@ def reset_to_fall_start(
     env.safefall_triggered[env_ids] = on  # hand-off starts are the policy's from the first step
     env.safefall_fall_time[env_ids] = 0.0
     env.safefall_fist_down[env_ids] = on.unsqueeze(-1)  # resting on the fists already
+    env.safefall_elbow_max[env_ids] = 0.0
+    env.safefall_arm_bend[env_ids] = on.float().unsqueeze(-1)  # resting: arms bent already
     env.safefall_side[env_ids] = 1.0 - 2.0 * st["handoff"].clamp_min(0).float()  # falls: set at the trigger
     env.safefall_hold[env_ids] = q[:, robot.find_joints(spec.ACTION_JOINT_NAMES, preserve_order=True)[0]]
 

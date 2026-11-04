@@ -135,6 +135,8 @@ class SafeFallEnv:
         self.triggered = np.ones(n, dtype=bool)  # the fall detector has handed over (set per episode at reset)
         self.fall_time = np.zeros(n)  # since the trigger [s]
         self.fist_down = np.zeros((n, 2), dtype=bool)  # the left / right fist has touched since the trigger
+        self.elbow_max = np.zeros((n, 2))  # deepest elbow flexion since its fist touched
+        self.arm_bend = np.zeros((n, 2))  # reflex arms yielded to the pose (0-1)
         self.hold = np.tile(self.default, (n, 1))  # start pose, held until the trigger
         self.ep_sums: dict[str, np.ndarray] = {}
         self.tracker = sf.OutcomeTracker(n)
@@ -201,6 +203,8 @@ class SafeFallEnv:
             self.triggered[i] = bool(st["handoff"][k] >= 0)
             self.fall_time[i] = 0.0
             self.fist_down[i] = bool(st["handoff"][k] >= 0)  # resting on them already (both)
+            self.elbow_max[i] = 0.0
+            self.arm_bend[i] = 1.0 if st["handoff"][k] >= 0 else 0.0
             self.hold[i] = q
             self.side[i] = 1.0 - 2.0 * max(int(st["handoff"][k]), 0)  # falls: set at the trigger
             if st["handoff"][k] < 0:
@@ -290,7 +294,11 @@ class SafeFallEnv:
         self.triggered |= new
         self.side = sf.update_side(torch.as_tensor(self.side, dtype=torch.float32), g).numpy().astype(np.float64)
         # offsets from the hand-off pose, in encoder coordinates (joints settle at target - offset)
-        reflex = sf.reflex_targets(torch.as_tensor(self.side), torch.as_tensor(self.hold[:, self.act]), torch.as_tensor(self.fall_time))
+        encoders = np.stack([d.qpos[self.qadr[self.act]] for d in self.datas]) + self.bias[:, self.act]
+        self.arm_bend = sf.update_arm_bend(torch.as_tensor(self.arm_bend), torch.as_tensor(self.side), torch.as_tensor(encoders),
+                                           torch.as_tensor(self.triggered)).numpy()
+        reflex = sf.reflex_targets(torch.as_tensor(self.side), torch.as_tensor(self.hold[:, self.act]), torch.as_tensor(self.fall_time),
+                                   torch.as_tensor(self.arm_bend))
         policy = reflex.numpy() + self.scale * a - self.bias[:, self.act]
         self.targets[:, self.act] = np.where(self.triggered[:, None], policy, self.hold[:, self.act])
         for i in np.where(self.episode_length_buf.numpy() == int(round(KICK_AT_S / self.step_dt)))[0]:
@@ -311,13 +319,16 @@ class SafeFallEnv:
         f = {g: torch.as_tensor(self.peak[:, b].sum(1), dtype=torch.float32) for g, b in self.body.items()}
         fist_touched = self.fist_down.copy()
         self.fist_down |= self.triggered[:, None] & torch.stack([sf._on(f["fist_l"]), sf._on(f["fist_r"])], dim=-1).numpy()
+        elbow_max = self.elbow_max.copy()
+        flex = sf.elbow_flexion(torch.as_tensor(qpos[:, self.qadr], dtype=torch.float32)).numpy()
+        self.elbow_max = np.where(self.fist_down, np.maximum(elbow_max, flex), elbow_max)
         T = lambda x: torch.as_tensor(x, dtype=torch.float32)  # noqa: E731
         state = sf.FallState(force=f, body_force=T(self.mean_force[:, self.contact_bodies]), head_h=T(head_z), trunk_h=T(trunk_z),
                              hand_h=T(hand_z), fist_h=T(fist_z), fist_vz=T((fist_z - self.prev_fist) / dt), foot_h=T(foot_z),
                              arm_width=widths,
                              fist_touched=torch.as_tensor(fist_touched),
                              head_vz=T((head_z - self.prev_z[:, 0]) / dt),
-                             trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]),
+                             trunk_vz=T((trunk_z - self.prev_z[:, 1]) / dt), gravity_b=T(grav), q=T(qpos[:, self.qadr]), elbow_max=T(elbow_max),
                              facing=T(self.facing), side=T(self.side))
         rew, parts = sf.reward(state, dt)
         lo, hi = self._soft_limits()
@@ -495,6 +506,7 @@ def main():
     p.add_argument("--passive", action="store_true", help="eval zero actions: the reflex alone (reach into the hand-off pose)")
     p.add_argument("--episodes", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--threads", type=int, default=None, help="stepping threads (default: all cores; fewer when several runs share the CPU)")
     p.add_argument("--render", default=None, help="PNG with side-view frames per fall direction")
     p.add_argument("--release_after", type=float, default=None,
                    help="damping mode (position gains 0, damping kept) after this many seconds; all envs in step")
@@ -506,7 +518,7 @@ def main():
         sf.HANDOFF_START_PROB = 0.0  # falls only
         global KICK_SPEED
         KICK_SPEED = 0.0  # the fall itself, as the Isaac play config
-    env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed)
+    env = SafeFallEnv(a.envs, a.mesh_dir, seed=a.seed, threads=a.threads)
     env.noise = a.mode == "train"
     runner = OnPolicyRunner(env, train_cfg(a.iters), log_dir=a.out if a.mode == "train" else None, device="cpu")
     if a.mode == "train":

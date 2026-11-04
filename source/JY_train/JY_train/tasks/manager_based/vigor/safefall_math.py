@@ -97,15 +97,18 @@ IMPACT_WEIGHTS = {  # by how weak the joints behind the body are
 
 # Hand-off poses for the get-up: symmetric PD targets the K1 rests in on several contacts, each carrying
 # 0.1-0.3 body weights (the old fist planks put 0.62 on the arms), held on the PD gains alone (arms
-# < 3.5 Nm), surviving 0.3 m/s pushes of the trunk in any direction and 0.6 m/s ones (the back pose not
-# fore and aft), head 0.31-0.33 m up, inside the soft joint limits.  Under load
-# the joints settle up to ~0.08 rad from these targets (handoff_poses.json has the settled angles and the
+# < 4 Nm), surviving 0.3 m/s pushes of the trunk in any direction and 0.6 m/s ones (the back pose not
+# fore and aft), head 0.29 / 0.37 m up, inside the soft joint limits.  Under load
+# the joints settle up to ~0.2 rad from these targets (the bent front elbows; handoff_poses.json has the settled angles and the
 # root state).  spec.ALL_JOINT_NAMES order (= INHA-Recovery-Motion K1_JOINT_ORDER); found, checked and
 # exported by scripts/vigor/handoff_pose.py.
 HANDOFF_POSES = {
-    # chest down, kneeling on fists, knees and toes, elbows a little bent, fists 0.28 m apart (0.45 looked like
-    # arms flung out): fists 0.20 each, knees 0.19-0.21, toes 0.13
-    "front": (0.000, 0.000, -1.180, -1.500, 0.300, -0.470, -1.180, 1.500, 0.300, 0.470, -1.080, 0.150, 0.000, 1.710, 0.220, 0.000, -1.080, -0.150, 0.000, 1.710, 0.220, 0.000),
+    # chest down, kneeling on fists, knees and toes, elbows bent (1.41 targeted, 1.61 rad under load), trunk
+    # 0.25 m up, fists 0.29 m apart: fists 0.17 each, knees 0.24, toes 0.10.  The first kneeling pose had the
+    # elbows nearly straight (0.47): falls bent them to ~1.8 rad on landing (the trunk down to 0.19 m) and
+    # then straightened them again by 0.8 rad, pushing the trunk back up to 0.27 m -- the arms gave to soak
+    # up the landing, then undid it (0.45 m between the fists before that looked like arms flung out)
+    "front": (0.000, 0.000, -0.800, -1.340, 0.210, -1.410, -0.800, 1.340, 0.210, 1.410, -1.520, 0.150, 0.000, 1.910, -0.390, 0.000, -1.520, -0.150, 0.000, 1.910, -0.390, 0.000),
     # sitting upright on the hips with the legs out in front on the ground, fists on the ground beside the hips
     # (0.45 m apart, 0.08 m behind the hip joints, elbows bent and close to the body): fists 0.21 each, hips
     # 0.20, heels 0.10.  The knees-up sit (hips near the heels) needed a deep squat mid-fall; sitting down
@@ -115,11 +118,24 @@ HANDOFF_POSES = {
     "back": (0.000, 0.000, 0.880, -1.440, -0.210, -1.230, 0.880, 1.440, -0.210, 1.230, -1.560, 0.150, 0.000, 0.180, -0.590, 0.000, -1.560, -0.150, 0.000, 0.180, -0.590, 0.000),
 }
 # root height [m] and trunk pitch [rad] resting in those poses (handoff_pose.py check)
-HANDOFF_ROOTS = {"front": (0.277, 1.058), "back": (0.124, -0.122)}
-# elbows (hand_link origins) and fist tips across the trunk in the hand-off poses (0.32 / 0.28 front,
+HANDOFF_ROOTS = {"front": (0.251, 1.396), "back": (0.124, -0.122)}
+# The arms reach for the ground with the elbows nearly straight (REACH_ARMS: the first kneeling pose's arms;
+# behind the reach is the pose itself) and each arm's targets yield towards the hand-off pose's bent arm as
+# far as the landing pushes its elbow: whatever the elbow is bent beyond its reflex target past
+# LOAD_DEFLECT moves the target along (``update_arm_bend``), never back.  Giving, an arm keeps pushing
+# with kp x LOAD_DEFLECT (5 Nm) plus what the policy adds, and stays where the landing left it instead of
+# pushing the trunk back up: with straight-armed targets throughout, forward falls bent the elbows to
+# 1.7-1.8 rad and straightened them again by 0.4-0.8, lifting the trunk 2-8 cm.  Proprioceptive (elbow
+# encoders against the reflex targets), as on the robot, which senses no touch in the fists.  Timed instead
+# (from the trigger or from the elbow first taking load, over 0.25 s), the targets also bent the elbows
+# where the landing had not: before late touches (folded to the joint limit, head down) or, in strong
+# pushes, while the fists were still braking the fall (forward head contact 8-13 % at 2.5-3.0 m/s).
+REACH_ARMS = {"front": (-1.180, -1.500, 0.300, -0.470, -1.180, 1.500, 0.300, 0.470), "back": None}
+LOAD_DEFLECT = 0.25  # rad
+# elbows (hand_link origins) and fist tips across the trunk in the hand-off poses (0.37 / 0.29 front,
 # 0.34 / 0.45 back) plus 5 cm: wider during the fall is arms flung out (arm_width).  Behind, the fists also
 # stay at least ARM_WIDTH_MIN apart: they reach for the ground beside the hips, not together behind the back
-ARM_WIDTH_MAX = {"front": (0.37, 0.33), "back": (0.39, 0.50)}
+ARM_WIDTH_MAX = {"front": (0.42, 0.34), "back": (0.39, 0.50)}
 ARM_WIDTH_MIN = {"front": (0.0, 0.0), "back": (0.0, 0.35)}
 # The reflex picks the front or back pose by a latched side (+1 front, -1 back): set from the tilt
 # direction at the trigger, switched only once the chest clearly faces the other way.  Picking by the
@@ -141,6 +157,9 @@ LEG_DELAY_S = {"front": 0.15, "back": 0.0}
 LEG_RAMP_S = {"front": 0.5, "back": 0.35}
 FALL_TIME_MAX = 1.0  # s: the actor observes the time since the trigger up to this
 LEG_ACTIONS = [i for i, n in enumerate(spec.ACTION_JOINT_NAMES) if "_Hip_" in n or "_Knee_" in n or "_Ankle_" in n]
+ARM_ACTIONS = [i for i, n in enumerate(spec.ACTION_JOINT_NAMES) if "Shoulder" in n or "Elbow" in n]
+assert ARM_ACTIONS == list(range(8)) and all(i not in ARM_ACTIONS for i in LEG_ACTIONS)  # REACH_ARMS order
+assert all("Left" in n for n in spec.ACTION_JOINT_NAMES[:4]) and all("Right" in n for n in spec.ACTION_JOINT_NAMES[4:8])
 
 
 def initial_side(facing: torch.Tensor) -> torch.Tensor:
@@ -154,32 +173,67 @@ def update_side(side: torch.Tensor, gravity_b: torch.Tensor) -> torch.Tensor:
     return torch.where(chest < -SIDE_SWITCH["front"], 1.0, torch.where(chest > SIDE_SWITCH["back"], -1.0, side))
 
 
-def leg_blend(side: torch.Tensor, fall_time: torch.Tensor) -> torch.Tensor:
-    """How far the legs' reflex has moved from the trigger pose to the hand-off pose (0-1, smoothstep)."""
-    delay = torch.where(side > 0, LEG_DELAY_S["front"], LEG_DELAY_S["back"])
-    ramp = torch.where(side > 0, LEG_RAMP_S["front"], LEG_RAMP_S["back"])
+def _blend(side: torch.Tensor, fall_time: torch.Tensor, delay_s: dict, ramp_s: dict) -> torch.Tensor:
+    delay = torch.where(side > 0, delay_s["front"], delay_s["back"])
+    ramp = torch.where(side > 0, ramp_s["front"], ramp_s["back"])
     x = ((fall_time - delay) / ramp).clamp(0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
 
 
-def reflex_targets(side: torch.Tensor, hold: torch.Tensor | None = None, fall_time: torch.Tensor | None = None) -> torch.Tensor:
+def leg_blend(side: torch.Tensor, fall_time: torch.Tensor) -> torch.Tensor:
+    """How far the legs' reflex has moved from the trigger pose to the hand-off pose (0-1, smoothstep)."""
+    return _blend(side, fall_time, LEG_DELAY_S, LEG_RAMP_S)
+
+
+def _arm_flexion_range(side: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(N, 1) elbow flexion of the reach and of the hand-off pose of the latched side."""
+    body = len(spec.HEAD_JOINT_NAMES)
+    el = spec.ACTION_JOINT_NAMES.index(ELBOWS[1])  # right: flexion = +q
+    flex = {k: (HANDOFF_POSES[k][body + el], (REACH_ARMS[k] or HANDOFF_POSES[k][body:])[el]) for k in ("front", "back")}
+    pose = torch.where(side > 0, flex["front"][0], flex["back"][0]).unsqueeze(-1)
+    reach = torch.where(side > 0, flex["front"][1], flex["back"][1]).unsqueeze(-1)
+    return reach, pose
+
+
+def update_arm_bend(arm_bend: torch.Tensor, side: torch.Tensor, q_enc: torch.Tensor, triggered: torch.Tensor) -> torch.Tensor:
+    """(N, 2) how far each arm's reflex has yielded from REACH_ARMS to the hand-off pose's arm (0-1): by
+    what its elbow is bent beyond the reflex elbow target past LOAD_DEFLECT, never back.  ``q_enc``: joint
+    encoder readings in spec.ACTION_JOINT_NAMES order (the reflex targets' coordinates)."""
+    reach, pose = _arm_flexion_range(side)
+    span = pose - reach
+    target = reach + arm_bend * span
+    excess = (elbow_flexion(q_enc, spec.ACTION_JOINT_NAMES) - target - LOAD_DEFLECT).clamp_min(0.0)
+    bend = ((target + excess - reach) / span.clamp_min(1e-3)).clamp(0.0, 1.0)
+    return torch.where(triggered.unsqueeze(-1) & (span > 1e-3), torch.maximum(arm_bend, bend), arm_bend)
+
+
+def reflex_targets(side: torch.Tensor, hold: torch.Tensor | None = None, fall_time: torch.Tensor | None = None,
+                   arm_bend: torch.Tensor | None = None) -> torch.Tensor:
     """Joint targets the policy's actions are offsets from, (N, 20) in spec.ACTION_JOINT_NAMES order.
 
     The hand-off pose of the latched side (``update_side``): with zero action the robot reaches for the
     ground and ends in a pose it holds, and the policy only learns the landing and balance on top.
     Measured from the walking stance instead, holding a plank took actions of -3.4 on shoulder or hip
     pitch and the policy never kept it.  Given the joint targets held at the trigger (``hold``, same
-    order) and the time since it, the legs blend from those to the pose (``leg_blend``).  On the robot
-    this is the same latch on the IMU's projected gravity, the targets at the switch and the time since."""
+    order) and the time since it, the legs blend from those to the pose (``leg_blend``); each arm from
+    REACH_ARMS as far as it yielded to the landing (``update_arm_bend``, (N, 2); None: reaching).  On the
+    robot this is the same latch on the IMU's projected gravity, the targets at the switch, the time since
+    and the elbow encoders against the reflex targets."""
     body = len(spec.HEAD_JOINT_NAMES)
     poses = torch.tensor([HANDOFF_POSES["front"][body:], HANDOFF_POSES["back"][body:]], device=side.device)
-    target = poses[(side < 0).long()]
+    back = (side < 0).long()
+    target = poses[back]
     if hold is None:
         return target
-    w = leg_blend(side, fall_time).unsqueeze(-1)
     legs = torch.zeros(target.shape[-1], dtype=torch.bool, device=side.device)
     legs[LEG_ACTIONS] = True
-    return torch.where(legs, hold + w * (target - hold), target)
+    reach = torch.tensor([[*(REACH_ARMS[k] or HANDOFF_POSES[k][body:body + len(ARM_ACTIONS)]), *HANDOFF_POSES[k][body + len(ARM_ACTIONS):]]
+                          for k in ("front", "back")], device=side.device)[back]
+    bend = torch.zeros(len(side), 2, device=side.device) if arm_bend is None else arm_bend
+    per_joint = torch.ones_like(target)
+    per_joint[:, ARM_ACTIONS] = bend.to(target.dtype).repeat_interleave(len(ARM_ACTIONS) // 2, dim=-1)  # left arm, right arm
+    arms = reach + per_joint * (target - reach)
+    return torch.where(legs, hold + leg_blend(side, fall_time).unsqueeze(-1) * (target - hold), arms)
 
 # per-second weights (the env multiplies by its step dt, as Isaac's RewardManager does).
 # Impacts last only a few 20 ms steps while the pose pays for seconds, so the contact weights are
@@ -215,6 +269,20 @@ WEIGHTS = {
     # forward falls put a fist down again 0.1-0.4 s later in 5-9 % (MuJoCo), each time a new impact and the
     # other arm and the knees alone holding the K1 meanwhile
     "fist_relift": -10.0,
+    # per second per rad an elbow is straighter than its deepest bend since its fist touched, beyond
+    # REBOUND_FREE, kneeling side: the arms give to soak up the landing and stay bent there (straightening
+    # pushed the trunk back up 8 cm).  Charged on the state, not on the opening speed: -2 per rad/s of
+    # opening made every jitter of the bent elbow ratchet it further, to the joint limit (2.3 rad, trunk
+    # and head sunk); measured from the deepest bend (capped at FOLD_MAX).  Not behind: sitting,
+    # the hips take the weight and the elbows open a little as the fists unload without lifting the trunk
+    # (bent further, the fists carried 0.04 body weights)
+    "arm_rebound": -5.0,
+    # per second per rad of elbow flexion beyond FOLD_MAX (each elbow, once its fist touched): the arms give,
+    # they do not fold.  arm_rebound alone left forward falls folded to the joint limit (2.2-2.3 rad, trunk
+    # 3-5 cm lower): the policy kept the +0.56 rad elbow offset it had learnt over straight-armed reflex
+    # targets and, once folded, unlearning it meant opening the elbows, which arm_rebound charged.  The
+    # deepest bend arm_rebound measures from is capped at FOLD_MAX too, so opening back to it is free
+    "elbow_fold": -10.0,
     # per m of foot origin above FOOT_FREE (each foot) once a fist has touched: the feet stay down after the
     # landing.  Counted during the fall too, it kept the hips from flexing early in backward falls (the K1
     # fell like a log and ended on its back, legs up) instead of sitting down with the legs out in front.
@@ -256,6 +324,7 @@ class FallState:
     trunk_vz: torch.Tensor
     gravity_b: torch.Tensor  # (N, 3) unit gravity in the trunk frame (projected gravity)
     q: torch.Tensor  # (N, 22) joint positions, spec.ALL_JOINT_NAMES order
+    elbow_max: torch.Tensor  # (N, 2) deepest elbow flexion since its fist touched, earlier steps [rad] (``elbow_flexion``)
     facing: torch.Tensor  # cos(fall azimuth from the heading): +1 forward fall, -1 backward, ~0 sideways
     side: torch.Tensor  # latched reflex side: +1 front (kneeling), -1 back (sitting)
 
@@ -417,6 +486,32 @@ def fist_lifted(s: FallState) -> torch.Tensor:
     return s.fist_touched.float() * (~on).float() * ((s.fist_h - RELIFT_H) / RELIFT_RAMP).clamp(0.0, 1.0)
 
 
+ELBOWS = ("Left_Elbow_Yaw", "Right_Elbow_Yaw")  # elbow flexion: -q on the left, +q on the right
+REBOUND_FREE = 0.15  # rad an elbow may open again from its deepest bend (arm_rebound)
+# rad of elbow flexion beyond which the elbows fold rather than give (elbow_fold): straight-armed reflex
+# targets bent them to 1.65-1.85 under forward landings; the front hand-off pose settles at 1.61
+FOLD_MAX = 1.9
+
+
+def elbow_flexion(q: torch.Tensor, names=spec.ALL_JOINT_NAMES) -> torch.Tensor:
+    """(N, 2) left / right elbow flexion of joint positions in the order of ``names`` [rad] (0.12
+    straightest, 2.32 most bent)."""
+    ids = [list(names).index(n) for n in ELBOWS]
+    return q[:, ids] * torch.tensor([-1.0, 1.0], device=q.device)
+
+
+def elbow_opened(s: FallState) -> torch.Tensor:
+    """(N, 2) how far each elbow has straightened again from its deepest bend since its fist touched, that
+    capped at FOLD_MAX [rad]."""
+    flex = elbow_flexion(s.q)
+    return (torch.maximum(s.elbow_max, flex).clamp_max(FOLD_MAX) - flex).clamp_min(0.0) * s.fist_touched.float()
+
+
+def elbow_folded(s: FallState) -> torch.Tensor:
+    """(N, 2) elbow flexion beyond FOLD_MAX once the fist touched [rad]."""
+    return (elbow_flexion(s.q) - FOLD_MAX).clamp_min(0.0) * s.fist_touched.float()
+
+
 def pose_error(s: FallState) -> torch.Tensor:
     """Mean squared error to the hand-off pose over the actuated (non-head) joints [rad^2]."""
     head = len(spec.HEAD_JOINT_NAMES)
@@ -451,6 +546,8 @@ def terms(s: FallState) -> dict[str, torch.Tensor]:
         "leg_spread": leg_spread(s),
         "arm_width": arm_flare(s),
         "fist_relift": fist_lifted(s).sum(dim=-1),
+        "arm_rebound": (elbow_opened(s) - REBOUND_FREE).clamp_min(0.0).sum(dim=-1) * (s.side > 0).float(),
+        "elbow_fold": elbow_folded(s).sum(dim=-1),
         "facing": turned,
     }
 
@@ -541,6 +638,8 @@ class OutcomeTracker:
     fists_first : no head, trunk, upper-arm or leg contact well before the first fist contact (``early_contact``)
     fist_width  : widest the fist tips got across the trunk while a fist touched [m] (hand-off poses: front 0.28, back 0.45)
     fist_lift   : time a fist spent lifted off the ground again after it touched, both fists summed [s] (``fist_lifted``)
+    elbow_rebound : how far the elbows had opened from their deepest bend at the last step, mean of the two [rad]
+    elbow_flex  : elbow flexion at the last step, mean of the two [rad] (front hand-off pose 1.61 under load)
     foot_lift   : highest foot origin above the ground [m] (standing 0.03, kneeling 0.12, sitting 0.08)
     leg_spread  : largest hip roll / yaw deviation from the hand-off pose [rad]
     support     : fraction of the time after the first touch-down spent supported (``support``)
@@ -553,7 +652,7 @@ class OutcomeTracker:
     """
 
     KEYS = ("head_hit", "trunk_hit", "head_peak", "trunk_peak", "impact", "arm_peak", "max_peak", "arm_share",
-            "fist_speed", "fists_first", "fist_width", "fist_lift", "foot_lift", "leg_spread", "support", "upright_end", "flipped", "handoff_end",
+            "fist_speed", "fists_first", "fist_width", "fist_lift", "elbow_rebound", "elbow_flex", "foot_lift", "leg_spread", "support", "upright_end", "flipped", "handoff_end",
             "pose_rms", "asym_rms")
 
     def __init__(self, num_envs: int, device="cpu", dt: float = spec.POLICY_DT):
@@ -596,6 +695,8 @@ class OutcomeTracker:
             "fists_first": 1.0 - early.float(),
             "fist_width": torch.maximum(v["fist_width"], s.arm_width[:, 1] * _on(fists)),
             "fist_lift": v["fist_lift"] + (fist_lifted(s) > 0).float().sum(dim=-1) * self.dt,
+            "elbow_rebound": elbow_opened(s).mean(dim=-1),
+            "elbow_flex": elbow_flexion(s.q).mean(dim=-1),
             "foot_lift": torch.maximum(v["foot_lift"], s.foot_h.amax(dim=-1)),
             "leg_spread": torch.maximum(v["leg_spread"], (s.q[:, spread] - handoff_target(s)[:, spread]).abs().amax(dim=-1)),
             "support": supported / after.clamp_min(1.0),
@@ -656,7 +757,7 @@ def summarize(episodes: list[dict]) -> dict:
 
 
 SCORE_KEYS = ("head_hit", "handoff_end", "fists_first", "trunk_hit", "impact", "arm_peak", "arm_share", "fist_speed",
-              "fist_lift", "foot_lift", "leg_spread", "pose_rms", "asym_rms")
+              "fist_lift", "elbow_rebound", "foot_lift", "leg_spread", "pose_rms", "asym_rms")
 IMPACT_SCORE = 0.5  # score per unit of the impact outcome
 
 

@@ -38,7 +38,7 @@ RECOVERY_NAMES = {"AAHead_yaw": "Head_Yaw", "Head_pitch": "Head_Pitch",
                   "ALeft_Shoulder_Pitch": "Left_Shoulder_Pitch", "ARight_Shoulder_Pitch": "Right_Shoulder_Pitch"}
 # symmetric pose parameters (shoulder pitch, |shoulder roll|, elbow pitch, |elbow yaw| (flexion), hip pitch,
 # |hip roll| (legs apart), knee, ankle pitch) and the trunk pitch the drop starts from
-CHOSEN = {"front": ((-1.18, 1.5, 0.3, 0.47, -1.08, 0.15, 1.71, 0.22), 1.21),
+CHOSEN = {"front": ((-0.8, 1.34, 0.21, 1.41, -1.52, 0.15, 1.91, -0.39), 1.11),
           "back": ((0.88, 1.44, -0.21, 1.23, -1.56, 0.15, 0.18, -0.59), -0.03)}
 RANGES = {  # search: uniform ranges of the parameters above (elbow pitch 0.3 unless given, hip roll 0.15) and the drop pitch
     "front": {"sp": (-2.0, -0.8), "sr": (1.1, 1.57), "ep": (-0.8, 0.9), "ey": (0.1, 1.0), "hp": (-1.8, -0.4), "kp": (1.0, 2.2),
@@ -51,6 +51,12 @@ RANGES = {  # search: uniform ranges of the parameters above (elbow pitch 0.3 un
     # back arms only (legs as CHOSEN): fists beside the hips instead of together behind the back
     "back_arms": {"sp": (0.3, 0.92), "sr": (0.9, 1.57), "ep": (-0.6, 0.6), "ey": (0.6, 1.5), "hp": (-1.56, -1.56),
                   "kp": (0.18, 0.18), "ap": (-0.59, -0.59), "pitch": (-0.5, 0.0)},
+    # elbows staying bent after they gave on landing (falls bend them to ~1.8 rad, trunk down to 0.19 m in
+    # front): no pushing back up into a straight-armed pose
+    "front_bent": {"sp": (-2.0, -0.4), "sr": (1.1, 1.57), "ep": (-0.6, 0.9), "ey": (1.3, 1.9), "hp": (-1.7, -0.5), "kp": (1.3, 2.2),
+                   "ap": (-0.4, 0.34), "pitch": (1.1, 1.6)},
+    "back_bent": {"sp": (0.3, 0.92), "sr": (0.9, 1.57), "ep": (-0.6, 0.6), "ey": (1.45, 1.9), "hp": (-1.56, -1.56),
+                  "kp": (0.18, 0.18), "ap": (-0.59, -0.59), "pitch": (-0.5, 0.0)},
 }
 SUPPORT = {"front": ["Left_Shank", "Right_Shank"], "back": ["Left_Hip_Roll", "Right_Hip_Roll"]}  # besides the fists
 NEVER = sf.CONTACT_GROUPS["head"] + sf.CONTACT_GROUPS["arms"]  # plus the trunk unless it is the pelvis
@@ -62,7 +68,7 @@ FIST_WIDTH_MAX = {"front": 0.30, "back": 0.45}  # m between the fist tips across
 # hands at the sides -- not together behind the back (the first legs-out sit had them 0.21 apart, 0.28 behind)
 FIST_WIDTH_MIN = {"front": None, "back": 0.32}
 FIST_BEHIND = {"front": None, "back": (0.03, 0.18)}  # m behind the hip joints along the heading
-ELBOW_WIDTH_MAX = {"front": None, "back": 0.42}  # elbows (hand_link origins) close to the body, not winged out
+ELBOW_WIDTH_MAX = {"front": 0.40, "back": 0.42}  # elbows (hand_link origins) close to the body, not winged out
 
 
 class Bench:
@@ -218,7 +224,7 @@ def _search(args) -> list:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["search", "poses", "check"])
-    p.add_argument("side", nargs="?", choices=["front", "back", "back_arms"], default="front", help="search: range set")
+    p.add_argument("side", nargs="?", choices=["front", "back", "back_arms", "front_bent", "back_bent"], default="front", help="search: range set")
     p.add_argument("--n", type=int, default=2000, help="search: candidates")
     p.add_argument("--out", default=None, help="check: JSON for the get-up team")
     p.add_argument("--render", default=None, help="check: PNG of both poses")

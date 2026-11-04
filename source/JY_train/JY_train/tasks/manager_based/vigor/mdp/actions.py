@@ -59,7 +59,8 @@ class ReflexJointPositionAction(JointPositionAction):
     and the actions are ignored (on the robot the walking policy runs until then).
 
     Zero action falls into the hand-off pose of the latched side and holds it (the legs blend there from
-    the held pose over time since the trigger); the policy learns offsets from there.  The joints must be ``spec.ACTION_JOINT_NAMES`` in that order."""
+    the held pose over time since the trigger, each arm as far as the landing bends its elbow); the policy learns
+    offsets from there.  The joints must be ``spec.ACTION_JOINT_NAMES`` in that order."""
 
     cfg: ReflexJointPositionActionCfg
 
@@ -68,7 +69,9 @@ class ReflexJointPositionAction(JointPositionAction):
         env = self._env
         triggered = update_trigger(env, self._asset.data.projected_gravity_b)
         # policy targets are in encoder coordinates: the joints settle at target - calibration offset
-        reflex = sf.reflex_targets(env.safefall_side, env.safefall_hold, env.safefall_fall_time)
+        encoders = self._asset.data.joint_pos[:, self._joint_ids] + env.safefall_joint_bias[:, 2:]
+        env.safefall_arm_bend[:] = sf.update_arm_bend(env.safefall_arm_bend, env.safefall_side, encoders, triggered)
+        reflex = sf.reflex_targets(env.safefall_side, env.safefall_hold, env.safefall_fall_time, env.safefall_arm_bend)
         policy = self._processed_actions + reflex - env.safefall_joint_bias[:, 2:]
         self._processed_actions = torch.where(triggered.unsqueeze(-1), policy, env.safefall_hold)
 
