@@ -6,6 +6,7 @@ The reward math, start distribution and outcome definitions live in ``safefall_m
 
 from __future__ import annotations
 
+import dataclasses
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -102,8 +103,18 @@ def fall_state(env: ManagerBasedEnv, robot_name: str = "robot", sensor_name: str
         facing=getattr(env, "safefall_facing", torch.zeros_like(ground)),
         side=getattr(env, "safefall_side", torch.ones_like(ground)),
     )
+    # a snapshot, not views of the env's and the robot's buffers: SafeFallMonitor.reset reads this state as
+    # the episodes' last one after the reset events overwrote those buffers (with views, the next episode's
+    # facing and side judged the end pose: backward falls ending seated read as not in the hand-off pose)
+    state = dataclasses.replace(state, **{f.name: _snapshot(getattr(state, f.name)) for f in dataclasses.fields(state)})
     env._safefall_cache = (step, state, sf.terms(state))
     return state
+
+
+def _snapshot(x):
+    if isinstance(x, torch.Tensor):
+        return x.clone()
+    return {k: _snapshot(v) for k, v in x.items()} if isinstance(x, dict) else x
 
 
 # -------------------------------------------------------------------- rewards
